@@ -1,0 +1,6 @@
+# Copy to .dev.vars for local development, or configure in Cloudflare Deploy UI.
+API_TOKEN=change-me-api-token
+PULL_TOKEN=change-me-pull-token
+CALLBACK_SECRET=change-me-callback-secret
+AES_KEY=change-me-32-byte-base64-aes-key
+GITHUB_TOKEN=github_pat_change_me

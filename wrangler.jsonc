@@ -1,0 +1,21 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "exit-ip-probe-demo",
+  "main": "worker/index.mjs",
+  "compatibility_date": "2026-01-01",
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    "GITHUB_OWNER": "AK-103U",
+    "GITHUB_REPO": "exit-ip-probe-demo",
+    "GITHUB_WORKFLOW": "probe.yml",
+    "GITHUB_REF": "main"
+  },
+  // Omit `id` so `wrangler deploy` and Workers Builds auto-provision the KV namespace.
+  "kv_namespaces": [
+    {
+      "binding": "PROBE_KV"
+    }
+  ]
+}

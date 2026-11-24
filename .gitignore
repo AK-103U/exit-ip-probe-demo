@@ -2,5 +2,6 @@ node_modules/
 .wrangler/
 .dev.vars
 .env
+.deploy-secrets.json
 *.local
 /tmp/

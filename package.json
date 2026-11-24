@@ -6,8 +6,43 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
+    "deploy:all": "node scripts/deploy.mjs",
     "test": "node --test test/*.test.mjs",
     "gen-secrets": "node scripts/gen-secrets.mjs"
+  },
+  "cloudflare": {
+    "bindings": {
+      "PROBE_KV": {
+        "description": "Workers KV namespace for temporary encrypted payloads and probe results."
+      },
+      "GITHUB_OWNER": {
+        "description": "GitHub username or organization hosting this repository."
+      },
+      "GITHUB_REPO": {
+        "description": "Public GitHub repository name containing .github/workflows/probe.yml."
+      },
+      "GITHUB_WORKFLOW": {
+        "description": "Workflow filename to dispatch (default: probe.yml)."
+      },
+      "GITHUB_REF": {
+        "description": "Git branch ref to dispatch (default: main)."
+      },
+      "API_TOKEN": {
+        "description": "Access password required by POST /probe and GET /result."
+      },
+      "PULL_TOKEN": {
+        "description": "Shared secret used by GitHub Runner to pull one-time encrypted payload."
+      },
+      "CALLBACK_SECRET": {
+        "description": "HMAC-SHA256 secret used to verify Runner callback payloads."
+      },
+      "AES_KEY": {
+        "description": "32-byte Base64 AES-256-GCM key shared with GitHub Secrets."
+      },
+      "GITHUB_TOKEN": {
+        "description": "Fine-grained GitHub PAT with Actions: Read and write on this repository."
+      }
+    }
   },
   "dependencies": {
     "js-yaml": "^4.1.0"
