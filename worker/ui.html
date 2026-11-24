@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Exit IP Probe</title>
+  <style>
+    :root {
+      --bg: #0b0f17;
+      --card: #121826;
+      --border: #232d42;
+      --text: #e6edf7;
+      --muted: #8b9bb4;
+      --accent: #3b82f6;
+      --accent-hover: #2563eb;
+      --ok: #10b981;
+      --err: #ef4444;
+      --warn: #f59e0b;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 24px 16px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+    .container {
+      max-width: 920px;
+      margin: 0 auto;
+      display: grid;
+      gap: 16px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+    }
+    h1 {
+      margin: 0 0 16px;
+      font-size: 20px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .badge {
+      font-size: 12px;
+      font-weight: 500;
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: rgba(59, 130, 246, 0.15);
+      color: #93c5fd;
+      border: 1px solid rgba(59, 130, 246, 0.3);
+    }
+    .row {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }
+    input, textarea {
+      width: 100%;
+      background: #0b101b;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      padding: 10px 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+      outline: none;
+    }
+    input:focus, textarea:focus {
+      border-color: var(--accent);
+    }
+    textarea {
+      min-height: 150px;
+      resize: vertical;
+    }
+    .actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-top: 12px;
+    }
+    button {
+      background: var(--accent);
+      color: #fff;
+      border: 0;
+      border-radius: 8px;
+      padding: 10px 18px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button:hover:not(:disabled) {
+      background: var(--accent-hover);
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .status {
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .status.ok { color: var(--ok); }
+    .status.err { color: var(--err); }
+    .status.warn { color: var(--warn); }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    th, td {
+      text-align: left;
+      padding: 10px 8px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+    th {
+      color: var(--muted);
+      font-weight: 500;
+    }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: #0b101b;
+      padding: 2px 6px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+    }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <h1>
+        <span>节点落地 IP 探测</span>
+        <span class="badge">CF Worker + GitHub Actions</span>
+      </h1>
+      <div class="row">
+        <input id="token" type="password" placeholder="API_TOKEN（访问密码）" autocomplete="off" />
+      </div>
+      <textarea
+        id="input"
+        placeholder="粘贴 Clash YAML 节点行（如 - { name: ..., type: hysteria2, ... }）或分享链接（hysteria2:// / vless:// / trojan:// / ss:// / vmess:// / tuic://，每行一个）"
+      ></textarea>
+      <div class="actions">
+        <button id="submitBtn">开始探测</button>
+        <span id="status" class="status"></span>
+      </div>
+    </div>
+
+    <div id="resultCard" class="card hidden">
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>节点</th>
+            <th>协议</th>
+            <th>落地 IP</th>
+            <th>归属地 / ISP</th>
+            <th>耗时</th>
+            <th>状态</th>
+          </tr>
+        </thead>
+        <tbody id="resultBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    const tokenEl = document.getElementById('token');
+    const inputEl = document.getElementById('input');
+    const submitBtn = document.getElementById('submitBtn');
+    const statusEl = document.getElementById('status');
+    const resultCard = document.getElementById('resultCard');
+    const resultBody = document.getElementById('resultBody');
+
+    const savedToken = sessionStorage.getItem('probe_api_token');
+    if (savedToken) tokenEl.value = savedToken;
+
+    let pollTimer = null;
+
+    function setStatus(text, cls = '') {
+      statusEl.textContent = text;
+      statusEl.className = 'status ' + cls;
+    }
+
+    function escapeHtml(str) {
+      return String(str ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    function renderResults(results) {
+      resultCard.classList.remove('hidden');
+      resultBody.innerHTML = results.map((item, idx) => {
+        const geo = [item.country, item.city, item.isp || item.asn].filter(Boolean).join(' · ') || '-';
+        const stateHtml = item.ok
+          ? '<span class="status ok">成功</span>'
+          : `<span class="status err">${escapeHtml(item.error || '失败')}</span>`;
+        return `<tr>
+          <td>${idx + 1}</td>
+          <td>${escapeHtml(item.name || '-')}</td>
+          <td><code>${escapeHtml(item.type || '-')}</code></td>
+          <td>${item.exit_ip ? `<code>${escapeHtml(item.exit_ip)}</code>` : '-'}</td>
+          <td>${escapeHtml(geo)}</td>
+          <td>${item.latency_ms != null ? `${item.latency_ms} ms` : '-'}</td>
+          <td>${stateHtml}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    async function pollResult(taskId, token, startedAt) {
+      const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
+      if (elapsedSec > 180) {
+        setStatus('探测超时（超过 180 秒未收到回调）', 'err');
+        submitBtn.disabled = false;
+        return;
+      }
+
+      try {
+        const res = await fetch(`/result?task_id=${encodeURIComponent(taskId)}`, {
+          headers: { Authorization: `Bearer ${token}` },
+          cache: 'no-store',
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          setStatus(data.error || `查询失败 (${res.status})`, 'err');
+          submitBtn.disabled = false;
+          return;
+        }
+        if (data.status === 'queued') {
+          setStatus(`GitHub Runner 执行中… 已等待 ${elapsedSec}s`, 'warn');
+          pollTimer = setTimeout(() => pollResult(taskId, token, startedAt), 2500);
+          return;
+        }
+        if (data.status === 'done') {
+          const okCount = (data.results || []).filter((r) => r.ok).length;
+          setStatus(`完成：${okCount}/${(data.results || []).length} 成功（总耗时 ${elapsedSec}s）`, 'ok');
+          renderResults(data.results || []);
+          submitBtn.disabled = false;
+          return;
+        }
+        setStatus(`任务失败：${data.error || '未知错误'}`, 'err');
+        submitBtn.disabled = false;
+      } catch (err) {
+        setStatus(`轮询异常：${err.message}`, 'warn');
+        pollTimer = setTimeout(() => pollResult(taskId, token, startedAt), 3000);
+      }
+    }
+
+    submitBtn.addEventListener('click', async () => {
+      if (pollTimer) clearTimeout(pollTimer);
+      const token = tokenEl.value.trim();
+      const input = inputEl.value.trim();
+      if (!token) return setStatus('请输入 API_TOKEN', 'err');
+      if (!input) return setStatus('请输入节点配置', 'err');
+
+      sessionStorage.setItem('probe_api_token', token);
+      submitBtn.disabled = true;
+      resultCard.classList.add('hidden');
+      setStatus('正在加密提交并触发 GitHub Actions…', 'warn');
+
+      try {
+        const res = await fetch('/probe', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ input }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          setStatus(data.error || `提交失败 (${res.status})`, 'err');
+          submitBtn.disabled = false;
+          return;
+        }
+        setStatus(`已排队 (${data.task_id.slice(0, 8)})，等待 Runner 启动…`, 'warn');
+        pollResult(data.task_id, token, Date.now());
+      } catch (err) {
+        setStatus(`请求异常：${err.message}`, 'err');
+        submitBtn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

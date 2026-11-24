@@ -1,0 +1,23 @@
+name = "exit-ip-probe-demo"
+main = "worker/index.mjs"
+compatibility_date = "2026-01-01"
+
+[vars]
+# 替换为你的 GitHub 用户名与公开仓库名
+GITHUB_OWNER = "AK-103U"
+GITHUB_REPO = "exit-ip-probe-demo"
+GITHUB_WORKFLOW = "probe.yml"
+GITHUB_REF = "main"
+
+# 部署前请先执行: pnpm exec wrangler kv namespace create PROBE_KV
+# 并将返回的 id 填到下方
+[[kv_namespaces]]
+binding = "PROBE_KV"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+# 需要配置的 Secrets (使用 wrangler secret put):
+# - API_TOKEN       : 前端/调用方访问 /probe 和 /result 的密码
+# - PULL_TOKEN      : GitHub Runner 拉取一次性密文的凭据
+# - CALLBACK_SECRET : GitHub Runner 回调签名的 HMAC 密钥
+# - AES_KEY         : 32字节 Base64 编码的 AES-256-GCM 密钥
+# - GITHUB_TOKEN    : Fine-grained PAT (仅单仓库 Actions: Read & Write)

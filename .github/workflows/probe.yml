@@ -1,0 +1,68 @@
+name: Exit IP Probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      task_id:
+        description: 'Opaque UUID task identifier'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12
+
+      - name: Install dependencies
+        run: pnpm install --prod --ignore-scripts
+
+      - name: Cache sing-box
+        id: cache-sb
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/bin/sing-box
+          key: sing-box-linux-amd64-v1.13.13
+
+      - name: Install sing-box
+        if: steps.cache-sb.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.local/bin
+          SB_VER="1.13.13"
+          URL="https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/sing-box-${SB_VER}-linux-amd64.tar.gz"
+          if ! curl -fsSL "$URL" -o /tmp/sb.tar.gz; then
+            SB_VER=$(curl -fsSL https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r '.tag_name | ltrimstr("v")')
+            URL="https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/sing-box-${SB_VER}-linux-amd64.tar.gz"
+            curl -fsSL "$URL" -o /tmp/sb.tar.gz
+          fi
+          tar -xzf /tmp/sb.tar.gz -C /tmp
+          mv /tmp/sing-box-*/sing-box ~/.local/bin/sing-box
+          chmod +x ~/.local/bin/sing-box
+          rm -rf /tmp/sb.tar.gz /tmp/sing-box-*
+
+      - name: Run exit IP probe
+        env:
+          TASK_ID: ${{ inputs.task_id }}
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          PULL_TOKEN: ${{ secrets.PULL_TOKEN }}
+          AES_KEY: ${{ secrets.AES_KEY }}
+          CALLBACK_SECRET: ${{ secrets.CALLBACK_SECRET }}
+        run: |
+          export SING_BOX_BIN="$HOME/.local/bin/sing-box"
+          node runner/probe.mjs
