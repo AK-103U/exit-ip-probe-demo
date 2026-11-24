@@ -226,7 +226,10 @@ export function createWorker(fetchFn = globalThis.fetch.bind(globalThis)) {
       const { pathname } = url;
 
       if (request.method === 'GET' && pathname === '/') {
-        return new Response(uiHtml, {
+        const html = env.API_TOKEN ? uiHtml : uiHtml
+          .replace('id="submitBtn"', 'id="submitBtn" disabled')
+          .replace('<span id="status" class="status"></span>', '<span id="status" class="status warn">尚未配置：请在 Cloudflare 的 Worker 设置 → Variables and Secrets 中添加 API_TOKEN，保存部署后刷新。</span>');
+        return new Response(html, {
           status: 200,
           headers: {
             'Content-Type': 'text/html; charset=utf-8',

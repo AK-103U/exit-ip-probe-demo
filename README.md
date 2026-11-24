@@ -37,12 +37,13 @@ pnpm run deploy:all
 
 ### 方案 B：网页一键部署（Deploy to Cloudflare 按钮）
 
-点击上方 **Deploy to Cloudflare** 按钮后，Cloudflare 会自动：
-1. 克隆仓库到你的 GitHub 账号；
-2. 依据 [wrangler.jsonc](wrangler.jsonc) 自动创建 `PROBE_KV`；
-3. 依据 [.dev.vars.example](.dev.vars.example) 与 [package.json](package.json) 弹出网页表单让你填写 5 个 Secrets 并完成部署。
+点击 **Deploy to Cloudflare**，选择目标仓库和 Worker，确认 `GITHUB_OWNER` 与 `GITHUB_REPO` 指向自己的仓库即可部署。`PROBE_KV` 自动绑定，无需在部署表单里填写密钥。此时首页可预览，尚不能提交探测任务。
 
-部署成功后，回到克隆出来的 GitHub 仓库 **Settings → Secrets and variables → Actions**，补充写入 4 个同名 Secrets 即可联通回调：
+首次使用时，由仓库所有者完成配置：
+
+1. 在本地执行 `pnpm run gen-secrets`，生成 `API_TOKEN`、`AES_KEY`、`PULL_TOKEN`、`CALLBACK_SECRET`。不要把生成的值提交到仓库。
+2. 在 **Cloudflare → Workers & Pages → 该 Worker → Settings → Variables and Secrets** 中将这四项添加为 Secret，再添加 `GITHUB_TOKEN`（仅目标仓库的 Fine-grained PAT，权限为 Actions: Read and write），保存并部署。`API_TOKEN` 是探测页面使用的访问密码，不是 Cloudflare 账户令牌。
+3. 在目标 GitHub 仓库 **Settings → Secrets and variables → Actions** 配置以下四项：
 - `AES_KEY`（与 Worker 中相同）
 - `PULL_TOKEN`（与 Worker 中相同）
 - `CALLBACK_SECRET`（与 Worker 中相同）
