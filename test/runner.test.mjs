@@ -68,6 +68,7 @@ test('runner/probe.mjs pulls encrypted task, masks stdout, and posts HMAC-signed
         AES_KEY: aesKey,
         CALLBACK_SECRET: callbackSecret,
         SING_BOX_BIN: 'nonexistent-sing-box-binary-for-test',
+        GITHUB_RUN_ID: '987654321',
       },
     });
 
@@ -78,12 +79,16 @@ test('runner/probe.mjs pulls encrypted task, masks stdout, and posts HMAC-signed
     assert.equal(receivedCallback.results.length, 1);
     assert.equal(receivedCallback.results[0].name, 'TestHK');
     assert.equal(receivedCallback.results[0].ok, false);
+    assert.equal(receivedCallback.results[0].error_code, 'core_spawn_failed');
+    assert.match(receivedCallback.results[0].error, /sing-box/);
+    assert.equal(receivedCallback.meta.core, 'sing-box');
+    assert.equal(receivedCallback.meta.run_id, '987654321');
 
     // Ensure no sensitive data or node details leak to CI logs
     const combinedLogs = `${stdout}\n${stderr}`;
     assert.equal(combinedLogs.includes(secretPass), false);
     assert.equal(combinedLogs.includes('TestHK'), false);
-    assert.match(stdout, new RegExp(`Task ${taskId} done: total=1, ok=0`));
+    assert.match(stdout, new RegExp(`Task ${taskId} done: total=1, ok=0, duration_ms=\\d+, codes=core_spawn_failed:1`));
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

@@ -7,11 +7,44 @@ import { promisify } from 'node:util';
 import { aesDecrypt, hmacSign } from '../shared/crypto.mjs';
 import { isValidUuid } from '../shared/validate.mjs';
 import { parseNodesInput } from './parser.mjs';
+import {
+  buildNodeResult,
+  createLineBuffer,
+  ipMatchesFamily,
+  parseCfTrace,
+  summarizeCodes,
+} from './diagnostics.mjs';
+import { geoLookup, prepareEch, resolveEntry, runnerHasIpv6 } from './netinfo.mjs';
 
 const execFileAsync = promisify(execFile);
 
 const SING_BOX_BIN = process.env.SING_BOX_BIN || 'sing-box';
 const CONCURRENCY = Number(process.env.PROBE_CONCURRENCY || 5);
+
+/**
+ * Exit IP probes per address family. IP-literal endpoints force the node to egress over
+ * that family; `dual` uses a dual-stack hostname to reveal which family the node prefers.
+ */
+const PROBES = {
+  ipv4: {
+    family: 4,
+    primary: 'https://1.1.1.1/cdn-cgi/trace',
+    fallback: 'https://api4.ipify.org?format=json',
+    hosts: ['1.1.1.1', 'api4.ipify.org'],
+  },
+  ipv6: {
+    family: 6,
+    primary: 'https://[2606:4700:4700::1111]/cdn-cgi/trace',
+    fallback: 'https://api6.ipify.org?format=json',
+    hosts: ['2606:4700:4700::1111', 'api6.ipify.org'],
+  },
+  dual: {
+    family: 0,
+    primary: 'https://www.cloudflare.com/cdn-cgi/trace',
+    fallback: 'https://api64.ipify.org?format=json',
+    hosts: ['www.cloudflare.com', 'api64.ipify.org'],
+  },
+};
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -38,143 +71,125 @@ async function waitForPort(host, port, timeoutMs = 5000, shouldAbort = () => fal
   return false;
 }
 
+/** Never throws: returns { ok, body } or { ok: false, curlCode, message }. */
 async function curlViaSocks(port, url, timeoutSec = 10) {
-  const { stdout } = await execFileAsync(
-    'curl',
-    [
-      '-sS',
-      '-L',
-      '--socks5-hostname',
-      `127.0.0.1:${port}`,
-      '--connect-timeout',
-      String(Math.min(timeoutSec, 8)),
-      '--max-time',
-      String(timeoutSec),
-      url,
-    ],
-    { timeout: (timeoutSec + 2) * 1000 },
-  );
-  return stdout;
-}
-
-function parseCfTrace(text) {
-  const map = {};
-  for (const line of String(text).split(/\r?\n/)) {
-    const eq = line.indexOf('=');
-    if (eq > 0) {
-      map[line.slice(0, eq)] = line.slice(eq + 1).trim();
-    }
-  }
-  return map;
-}
-
-async function queryExitInfo(port) {
-  let exitIp = '';
-  let loc = '';
-
-  // Primary: Cloudflare cdn-cgi/trace (fast, plain text, no bot challenge)
   try {
-    const trace = parseCfTrace(await curlViaSocks(port, 'https://www.cloudflare.com/cdn-cgi/trace', 10));
-    if (trace.ip) {
-      exitIp = trace.ip;
-      loc = trace.loc || '';
-    }
-  } catch {
-    // fallback below
-  }
-
-  // Fallback: ipify
-  if (!exitIp) {
-    const ipifyRaw = await curlViaSocks(port, 'https://api64.ipify.org?format=json', 10);
-    const parsed = JSON.parse(ipifyRaw);
-    if (!parsed?.ip) throw new Error('Empty IP response');
-    exitIp = parsed.ip;
-  }
-
-  // Best-effort Geo/ASN enrichment via proxy
-  let geo = {};
-  try {
-    const geoRaw = await curlViaSocks(
-      port,
-      'http://ip-api.com/json?fields=status,country,countryCode,regionName,city,isp,org,as,query',
-      6,
+    const { stdout } = await execFileAsync(
+      'curl',
+      [
+        '-sS',
+        '-g',
+        '--socks5-hostname',
+        `127.0.0.1:${port}`,
+        '--connect-timeout',
+        String(Math.min(timeoutSec, 8)),
+        '--max-time',
+        String(timeoutSec),
+        url,
+      ],
+      { timeout: (timeoutSec + 2) * 1000, maxBuffer: 256 * 1024 },
     );
-    const parsed = JSON.parse(geoRaw);
-    if (parsed?.status === 'success') {
-      geo = parsed;
-    }
-  } catch {
-    // ignore geo enrichment failures
+    return { ok: true, body: stdout };
+  } catch (err) {
+    const stderr = String(err?.stderr || '').trim().split(/\r?\n/).pop() || '';
+    return {
+      ok: false,
+      curlCode: typeof err?.code === 'number' ? err.code : null,
+      message: (stderr || (err?.killed ? 'curl killed after timeout' : 'curl failed')).slice(0, 200),
+    };
   }
-
-  return {
-    exit_ip: exitIp,
-    country: geo.countryCode || geo.country || loc || undefined,
-    region: geo.regionName || undefined,
-    city: geo.city || undefined,
-    isp: geo.isp || geo.org || undefined,
-    asn: geo.as || undefined,
-  };
 }
 
+async function probeFamily(port, spec) {
+  const started = Date.now();
+  const attempts = [];
+
+  const trace = await curlViaSocks(port, spec.primary, 10);
+  if (trace.ok) {
+    const t = parseCfTrace(trace.body);
+    if (ipMatchesFamily(t.ip, spec.family)) {
+      return { ok: true, ip: t.ip, colo: t.colo, warp: t.warp, source: 'cf-trace', ms: Date.now() - started };
+    }
+    attempts.push({ ok: false, badResponse: true, message: 'unexpected cdn-cgi/trace response' });
+  } else {
+    attempts.push(trace);
+  }
+
+  const ipify = await curlViaSocks(port, spec.fallback, 8);
+  if (ipify.ok) {
+    let ip;
+    try {
+      ip = JSON.parse(ipify.body)?.ip;
+    } catch {
+      ip = undefined;
+    }
+    if (ipMatchesFamily(ip, spec.family)) {
+      return { ok: true, ip, source: 'ipify', ms: Date.now() - started };
+    }
+    attempts.push({ ok: false, badResponse: true, message: 'unexpected ipify response' });
+  } else {
+    attempts.push(ipify);
+  }
+
+  return { ok: false, attempts, ms: Date.now() - started };
+}
+
+/** Runs one node through sing-box and collects raw observations (not yet redacted). */
 async function probeSingleNode(node, index) {
   const socksPort = 21000 + index;
   const cfgPath = join(tmpdir(), `sb-probe-${process.pid}-${index}.json`);
   const config = {
-    log: { level: 'panic' },
-    inbounds: [
-      {
-        type: 'socks',
-        tag: 'socks-in',
-        listen: '127.0.0.1',
-        listen_port: socksPort,
-      },
-    ],
+    // Captured in memory only (never printed) so failures can be classified.
+    log: { level: 'warn', timestamp: false },
+    inbounds: [{ type: 'socks', tag: 'socks-in', listen: '127.0.0.1', listen_port: socksPort }],
     outbounds: [node.outbound],
   };
-
   writeFileSync(cfgPath, JSON.stringify(config), { mode: 0o600 });
 
+  const base = { index, name: node.name, type: node.type, outbound: node.outbound, ech: node.ech };
+  const entryPromise = resolveEntry(node.outbound.server);
+  const logs = createLineBuffer(80);
   const startedAt = Date.now();
   let spawnErr = null;
-  const child = spawn(SING_BOX_BIN, ['run', '-c', cfgPath], {
-    stdio: 'ignore',
-  });
+
+  const child = spawn(SING_BOX_BIN, ['run', '-c', cfgPath], { stdio: ['ignore', 'pipe', 'pipe'] });
+  child.stdout.on('data', (d) => logs.push(d));
+  child.stderr.on('data', (d) => logs.push(d));
   child.on('error', (err) => {
     spawnErr = err;
   });
 
   try {
-    const ready = await waitForPort(
-      '127.0.0.1',
-      socksPort,
-      5000,
-      () => Boolean(spawnErr || child.exitCode !== null),
-    );
-    if (spawnErr) {
-      throw new Error(`sing-box spawn error: ${spawnErr.code || spawnErr.message}`);
-    }
-    if (!ready || child.exitCode !== null) {
-      throw new Error('sing-box failed to start');
+    const ready = await waitForPort('127.0.0.1', socksPort, 5000, () => Boolean(spawnErr || child.exitCode !== null));
+    const coreReadyMs = Date.now() - startedAt;
+
+    if (spawnErr || !ready || child.exitCode !== null) {
+      await sleep(100); // let the core flush its fatal message
+      return {
+        ...base,
+        entry: await entryPromise,
+        coreFailure: spawnErr ? 'core_spawn_failed' : 'core_start_failed',
+        coreFailureDetail: spawnErr ? `spawn ${spawnErr.code || 'error'}` : undefined,
+        coreLines: logs.lines(),
+        latency_ms: Date.now() - startedAt,
+        timings: { core_ready_ms: coreReadyMs },
+      };
     }
 
-    const info = await queryExitInfo(socksPort);
+    const [ipv4, ipv6, dual] = await Promise.all([
+      probeFamily(socksPort, PROBES.ipv4),
+      probeFamily(socksPort, PROBES.ipv6),
+      probeFamily(socksPort, PROBES.dual),
+    ]);
+    await sleep(50);
+
     return {
-      index,
-      name: node.name,
-      type: node.type,
-      ok: true,
-      ...info,
+      ...base,
+      entry: await entryPromise,
+      families: { ipv4, ipv6, dual },
+      coreLines: logs.lines(),
       latency_ms: Date.now() - startedAt,
-    };
-  } catch (err) {
-    return {
-      index,
-      name: node.name,
-      type: node.type,
-      ok: false,
-      error: err?.message ? String(err.message).slice(0, 120) : 'Probe failed',
-      latency_ms: Date.now() - startedAt,
+      timings: { core_ready_ms: coreReadyMs, ipv4_ms: ipv4.ms, ipv6_ms: ipv6.ms, dual_ms: dual.ms },
     };
   } finally {
     try {
@@ -206,12 +221,43 @@ async function mapWithConcurrency(items, limit, fn) {
   return results;
 }
 
-async function pullEncryptedPayload(workerUrl, taskId, pullToken) {
+async function coreVersion() {
+  try {
+    const { stdout } = await execFileAsync(SING_BOX_BIN, ['version'], { timeout: 5000 });
+    return /version\s+(\S+)/.exec(stdout)?.[1] || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Enriches raw probes with exact-IP geo data and turns them into redacted results. */
+async function finalizeResults(probes) {
+  const ips = [];
+  for (const p of probes) {
+    ips.push(...(p.entry?.ips || []));
+    for (const f of Object.values(p.families || {})) if (f?.ok) ips.push(f.ip);
+  }
+
+  const needsIpv6Check = probes.some(
+    (p) => !Object.values(p.families || {}).some((f) => f?.ok) && (p.entry?.ips || []).some((ip) => net.isIP(ip) === 6),
+  );
+  const [geoMap, runnerIpv6] = await Promise.all([
+    geoLookup(ips),
+    needsIpv6Check ? runnerHasIpv6() : Promise.resolve(undefined),
+  ]);
+
+  const hosts = { ipv4: PROBES.ipv4.hosts, ipv6: PROBES.ipv6.hosts };
+  const results = probes.map((p) => buildNodeResult(p, geoMap, { runnerIpv6, hosts }));
+  const geoSources = [...new Set([...geoMap.values()].map((g) => g.geo_source))];
+  return { results, runnerIpv6, geoSources };
+}
+
+async function pullEncryptedPayload(workerUrl, taskId, pullToken, runId) {
   const url = `${workerUrl.replace(/\/$/, '')}/internal/pull?task_id=${encodeURIComponent(taskId)}`;
+  const headers = { Authorization: `Bearer ${pullToken}` };
+  if (runId) headers['X-Run-Id'] = runId;
   for (let attempt = 1; attempt <= 3; attempt++) {
-    const res = await fetch(url, {
-      headers: { Authorization: `Bearer ${pullToken}` },
-    });
+    const res = await fetch(url, { headers });
     if (res.ok) {
       return res.json();
     }
@@ -250,6 +296,7 @@ async function main() {
   const pullToken = process.env.PULL_TOKEN || '';
   const aesKey = process.env.AES_KEY || '';
   const callbackSecret = process.env.CALLBACK_SECRET || '';
+  const runId = /^\d{1,20}$/.test(process.env.GITHUB_RUN_ID || '') ? process.env.GITHUB_RUN_ID : undefined;
 
   if (!isValidUuid(taskId)) {
     throw new Error('Invalid or missing TASK_ID');
@@ -259,12 +306,14 @@ async function main() {
   }
 
   const startedAt = Date.now();
+  const meta = { core: 'sing-box', core_version: null, run_id: runId };
   let callbackPayload;
 
   try {
-    const pulled = await pullEncryptedPayload(workerUrl, taskId, pullToken);
+    const pulled = await pullEncryptedPayload(workerUrl, taskId, pullToken, runId);
     const decrypted = JSON.parse(await aesDecrypt(pulled.cipher, aesKey));
     const nodes = parseNodesInput(decrypted.raw_input);
+    meta.core_version = await coreVersion();
 
     if (nodes.length === 0) {
       callbackPayload = {
@@ -275,7 +324,11 @@ async function main() {
         duration_ms: Date.now() - startedAt,
       };
     } else {
-      const results = await mapWithConcurrency(nodes, CONCURRENCY, probeSingleNode);
+      await prepareEch(nodes);
+      const probes = await mapWithConcurrency(nodes, CONCURRENCY, probeSingleNode);
+      const { results, runnerIpv6, geoSources } = await finalizeResults(probes);
+      meta.runner_ipv6 = runnerIpv6;
+      meta.geo_sources = geoSources;
       callbackPayload = {
         task_id: taskId,
         status: 'done',
@@ -293,12 +346,16 @@ async function main() {
     };
   }
 
+  callbackPayload.meta = meta;
   await sendCallback(workerUrl, callbackSecret, callbackPayload);
 
-  // Never print node details, credentials, or exit IPs in public CI logs.
-  const okCount = (callbackPayload.results || []).filter((r) => r.ok).length;
+  // Never print node details, credentials, or exit IPs in public CI logs: counts and codes only.
+  const results = callbackPayload.results || [];
+  const okCount = results.filter((r) => r.ok).length;
+  const codes = summarizeCodes(results);
   console.log(
-    `Task ${taskId} ${callbackPayload.status}: total=${(callbackPayload.results || []).length}, ok=${okCount}, duration_ms=${callbackPayload.duration_ms}`,
+    `Task ${taskId} ${callbackPayload.status}: total=${results.length}, ok=${okCount}, duration_ms=${callbackPayload.duration_ms}` +
+      (codes ? `, codes=${codes}` : ''),
   );
 }
 
