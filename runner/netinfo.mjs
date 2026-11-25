@@ -2,7 +2,7 @@
  * Network-facing helpers used by the Runner outside of the proxy tunnel:
  * ECH config retrieval over DoH, entry host resolution, IP geo lookup, Runner IPv6 check.
  */
-import { lookup } from 'node:dns/promises';
+import { lookup, resolve4 as sysResolve4, resolve6 as sysResolve6 } from 'node:dns/promises';
 import http from 'node:http';
 import net from 'node:net';
 import { echConfigToPem } from './parser.mjs';
@@ -76,6 +76,38 @@ export async function prepareEch(nodes, fetchFn = fetch) {
       node.ech = 'dns';
     }
   }
+}
+
+/**
+ * First A and AAAA address of `host` (system resolver, DoH fallback). Used to force the
+ * dual-stack ippure endpoint onto a specific family via curl --connect-to.
+ */
+export async function resolveHostAddresses(
+  host,
+  { resolve4 = sysResolve4, resolve6 = sysResolve6, fetchFn = fetch } = {},
+) {
+  const pick = async (resolveFn, type, family) => {
+    try {
+      const addrs = await withTimeout(resolveFn(host), 4000, null);
+      // Ignore fake-ip / private answers (e.g. a TUN proxy's 198.18.0.0/15) and ask DoH instead.
+      const hit = (addrs || []).find((a) => net.isIP(a) === family && isPublicIp(a));
+      if (hit) return hit;
+    } catch {
+      // fall back to DoH
+    }
+    try {
+      const res = await fetchFn(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(host)}&type=${type}`, {
+        headers: { accept: 'application/dns-json' },
+        signal: AbortSignal.timeout(4000),
+      });
+      const data = await res.json();
+      return (data?.Answer || []).map((a) => a?.data).find((a) => net.isIP(String(a)) === family && isPublicIp(a));
+    } catch {
+      return undefined;
+    }
+  };
+  const [v4, v6] = await Promise.all([pick(resolve4, 'A', 4), pick(resolve6, 'AAAA', 6)]);
+  return { v4, v6 };
 }
 
 export async function resolveEntry(server) {

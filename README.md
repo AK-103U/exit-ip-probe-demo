@@ -76,11 +76,15 @@ pnpm run dev
 
 ## 探测结果
 
-每个节点会分别探测 **IPv4 出口**（`1.1.1.1`）、**IPv6 出口**（`2606:4700:4700::1111`）和**双栈默认出口**（`www.cloudflare.com`），然后从 Runner 直接按**确切的落地 IP** 查询归属地，主源为 ip-api 批量接口，失败时改用 ipwho.is。这样归属信息总能对应到显示的 IP 上。
+每个节点会分别探测 **IPv4 出口**、**IPv6 出口**和**双栈默认出口**，三项都经节点隧道发出请求：
+
+- 主力：[ippure](https://my.ippure.com/v1/info)。一次请求就能拿到落地 IP、归属地、ASN，以及风险分（`fraud_score`）、是否住宅 IP（`residential`）、是否广播 IP（`broadcast`）。ippure 是双栈域名，所以 Runner 会先解析出它的 A/AAAA 地址，再用 `curl --connect-to` 强制走 IPv4 或 IPv6。
+- 备用：Cloudflare `cdn-cgi/trace`（`1.1.1.1` / `2606:4700:4700::1111` / `www.cloudflare.com`），然后是 ipify。
+- 入口 IP 的归属，以及落地 IP 的机房/代理/移动网络标记，由 Runner 直接按确切 IP 查询：主源为 ip-api 批量接口，失败时改用 ipwho.is。归属信息总是对应显示的那个 IP，落地的位置和 ASN 以 ippure 为准。
 
 | 字段 | 含义 |
 | :--- | :--- |
-| `ipv4` / `ipv6` | 各协议族的出口 IP、国家/城市、ISP、ASN，以及 `hosting`（机房 IP）、`warp`（经 Cloudflare WARP 出口）、`same_as_entry` |
+| `ipv4` / `ipv6` | 各协议族的出口 IP、国家/城市、ISP、ASN；`fraud_score` / `residential` / `broadcast`（来自 ippure）；`hosting`（机房 IP）、`warp`（经 Cloudflare WARP 出口）、`same_as_entry`；`source` 表示 IP 来自哪个查询源 |
 | `preferred` | 访问双栈网站时节点优先使用的协议族 |
 | `entry.ips` / `relation` | 入口解析结果与出入口关系：`direct`（入口即落地）、`same_network`（同 ASN 不同 IP）、`relay`（中转/分离出口）、`cdn`（入口为 CDN 边缘，包括 ASN 不属于 Cloudflare、但由 Cloudflare 边缘应答的“优选 IP”，此时 `entry.cdn_edge` 为 `cloudflare`） |
 | `error_code` / `error` / `detail` | 失败原因分类、中文说明，以及脱敏后的内核或 curl 报错（已去除服务器地址、SNI、密码、UUID 等） |

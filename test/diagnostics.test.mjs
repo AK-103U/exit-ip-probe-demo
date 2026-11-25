@@ -8,6 +8,7 @@ import {
   collectSensitive,
   createLineBuffer,
   isPublicIp,
+  normalizeIppure,
   redact,
   summarizeCodes,
 } from '../runner/diagnostics.mjs';
@@ -264,4 +265,47 @@ test('chained nodes report their front and redact the front proxy credentials to
   });
   assert.equal(invalid.error_code, 'chain_invalid');
   assert.match(invalid.detail, /Missing/);
+});
+
+test('normalizeIppure maps risk fields and tolerates missing values', () => {
+  const g = normalizeIppure({ ip: '198.51.100.1', asn: 401434, asOrganization: 'Example', countryCode: 'HK', city: 'Hong Kong', fraudScore: 0, isResidential: false, isBroadcast: true });
+  assert.equal(g.asn, 'AS401434 Example');
+  assert.equal(g.fraud_score, 0);
+  assert.equal(g.residential, false);
+  assert.equal(g.broadcast, true);
+  const sparse = normalizeIppure({ ip: '198.51.100.1', fraudScore: null, asn: '' });
+  assert.equal(sparse.fraud_score, undefined);
+  assert.equal(sparse.asn, undefined);
+  assert.equal(normalizeIppure({}), null);
+});
+
+test('ippure geo from the probe wins over ip-api for location, ip-api keeps hosting and WARP hints', () => {
+  const ipapi = new Map([
+    ['198.51.100.148', { country_code: 'US', city: 'San Antonio', isp: 'Example (US) LLC', asn: 'AS401434 Example (US) LLC', hosting: true, geo_source: 'ip-api' }],
+    ['2001:db8:a::1', { country_code: 'AU', isp: 'Cloudflare, Inc.', org: 'Cloudflare WARP', asn: 'AS13335 Cloudflare, Inc.', geo_source: 'ip-api' }],
+  ]);
+  const result = buildNodeResult(
+    {
+      index: 0,
+      name: 'HK-V6',
+      type: 'trojan',
+      outbound: OUTBOUND,
+      entry: { ips: ['203.0.113.50'] },
+      families: {
+        ipv4: { ok: true, ip: '198.51.100.148', source: 'ippure', geo: { country_code: 'HK', city: 'Hong Kong', asn: 'AS401434 Example', broadcast: true, residential: false, fraud_score: 40 } },
+        ipv6: { ok: true, ip: '2001:db8:a::1', source: 'ippure', geo: { country_code: 'AU', asn: 'AS13335 Cloudflare, Inc.', org: 'Cloudflare, Inc.' } },
+        dual: { ok: true, ip: '198.51.100.148', source: 'ippure', geo: { country_code: 'HK' } },
+      },
+      coreLines: [],
+    },
+    ipapi,
+  );
+  assert.equal(result.ipv4.country_code, 'HK');
+  assert.equal(result.ipv4.city, 'Hong Kong');
+  assert.equal(result.ipv4.hosting, true, 'ip-api hosting flag is kept');
+  assert.equal(result.ipv4.broadcast, true);
+  assert.equal(result.ipv4.fraud_score, 40);
+  assert.equal(result.ipv4.geo_source, 'ippure');
+  assert.equal(result.ipv6.warp, true, 'WARP still detected from the ip-api org');
+  assert.equal(result.country, 'HK');
 });

@@ -219,6 +219,35 @@ export function normalizeIpApi(r) {
   };
 }
 
+const numOrUndef = (v) => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v)) ? undefined : Number(v));
+
+/**
+ * my.ippure.com/v1/info → geo record. Adds fraud_score (0–100), residential and broadcast
+ * (registration country differs from where the IP is used, i.e. not "原生").
+ */
+export function normalizeIppure(r) {
+  if (!r || typeof r !== 'object' || !r.ip) return null;
+  const asn = numOrUndef(r.asn);
+  const org = r.asOrganization || undefined;
+  return {
+    country: r.country || undefined,
+    country_code: r.countryCode || undefined,
+    region: r.region || undefined,
+    city: r.city || undefined,
+    isp: org,
+    org,
+    asn: asn ? `AS${asn}${org ? ` ${org}` : ''}` : undefined,
+    timezone: r.timezone || undefined,
+    fraud_score: numOrUndef(r.fraudScore),
+    residential: typeof r.isResidential === 'boolean' ? r.isResidential : undefined,
+    broadcast: typeof r.isBroadcast === 'boolean' ? r.isBroadcast : undefined,
+  };
+}
+
+function definedOnly(obj) {
+  return Object.fromEntries(Object.entries(obj || {}).filter(([, v]) => v !== undefined));
+}
+
 export function normalizeIpWhois(r) {
   if (!r || r.success === false) return null;
   const c = r.connection || {};
@@ -259,18 +288,21 @@ export function classifyRelation(entryIps = [], entryGeos = [], exits = [], opts
   return 'relay';
 }
 
-function isWarp(exit, geo) {
+function isWarp(exit, ...geos) {
   if (exit?.warp === 'on' || exit?.warp === 'plus') return true;
-  return asnNumber(geo?.asn) === 13335 && /warp/i.test(`${geo?.org || ''} ${geo?.isp || ''}`);
+  return geos.some((g) => asnNumber(g?.asn) === 13335 && /warp/i.test(`${g?.org || ''} ${g?.isp || ''}`));
 }
 
 function exitRecord(probe, geoMap, entryIps) {
   if (!probe?.ok) return null;
-  const geo = geoMap.get(probe.ip) || {};
+  const lookup = geoMap.get(probe.ip) || {};
+  // ippure answered the very request that revealed this exit, so it wins for location / ASN /
+  // risk; the ip-api lookup still contributes hosting / proxy / mobile flags.
+  const geo = probe.geo ? { ...lookup, ...definedOnly(probe.geo), geo_source: 'ippure' } : lookup;
   return {
     ip: probe.ip,
     ...geo,
-    warp: isWarp(probe, geo) || undefined,
+    warp: isWarp(probe, lookup, geo) || undefined,
     same_as_entry: entryIps.includes(probe.ip),
     colo: probe.colo || undefined,
     source: probe.source,

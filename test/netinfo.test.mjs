@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { echFromDohAnswer, geoLookup, isCloudflareEdge, prepareEch } from '../runner/netinfo.mjs';
+import { echFromDohAnswer, geoLookup, isCloudflareEdge, prepareEch, resolveHostAddresses } from '../runner/netinfo.mjs';
 
 function echB64() {
   const pn = Buffer.from('cloudflare-ech.com');
@@ -108,4 +108,40 @@ test('isCloudflareEdge recognizes a Cloudflare trace response and rejects other 
     edge.close();
     other.close();
   }
+});
+
+test('resolveHostAddresses prefers the system resolver and falls back to DoH per family', async () => {
+  const viaSystem = await resolveHostAddresses('my.ippure.com', {
+    resolve4: async () => ['203.0.113.4'],
+    resolve6: async () => ['2001:db8::4'],
+    fetchFn: async () => {
+      throw new Error('DoH must not be used');
+    },
+  });
+  assert.deepEqual(viaSystem, { v4: '203.0.113.4', v6: '2001:db8::4' });
+
+  const doh = [];
+  const viaDoh = await resolveHostAddresses('my.ippure.com', {
+    resolve4: async () => ['203.0.113.4'],
+    resolve6: async () => {
+      throw Object.assign(new Error('nodata'), { code: 'ENODATA' });
+    },
+    fetchFn: async (url) => {
+      doh.push(url);
+      return jsonResponse({ Answer: [{ type: 5, data: 'alias.' }, { type: 28, data: '2001:db8::5' }] });
+    },
+  });
+  assert.deepEqual(viaDoh, { v4: '203.0.113.4', v6: '2001:db8::5' });
+  assert.equal(doh.length, 1);
+  assert.match(doh[0], /type=AAAA/);
+});
+
+test('resolveHostAddresses ignores fake-ip answers from a hijacking resolver', async () => {
+  const res = await resolveHostAddresses('my.ippure.com', {
+    resolve4: async () => ['198.18.2.19'],
+    resolve6: async () => [],
+    fetchFn: async (url) =>
+      jsonResponse({ Answer: [{ type: url.includes('type=AAAA') ? 28 : 1, data: url.includes('type=AAAA') ? '2001:db8::7' : '203.0.113.7' }] }),
+  });
+  assert.deepEqual(res, { v4: '203.0.113.7', v6: '2001:db8::7' });
 });

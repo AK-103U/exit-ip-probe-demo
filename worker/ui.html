@@ -255,8 +255,24 @@
     function exitTags(exit) {
       const tags = [];
       if (exit.warp) tags.push(tag('WARP', 'info', '经 Cloudflare WARP 出口'));
-      if (exit.hosting === true) tags.push(tag('机房', 'warn', 'ip-api 标记为托管 / 数据中心 IP'));
-      if (exit.hosting === false && !exit.warp) tags.push(tag('非机房', 'ok', 'ip-api 未标记为数据中心 IP（疑似住宅 / 原生）'));
+      if (typeof exit.residential === 'boolean') {
+        tags.push(exit.residential
+          ? tag('住宅', 'ok', 'ippure：住宅 IP')
+          : tag('非住宅', 'warn', 'ippure：非住宅（机房 / 商业）IP'));
+      } else if (exit.hosting === true) {
+        tags.push(tag('机房', 'warn', 'ip-api 标记为托管 / 数据中心 IP'));
+      } else if (exit.hosting === false && !exit.warp) {
+        tags.push(tag('非机房', 'ok', 'ip-api 未标记为数据中心 IP'));
+      }
+      if (typeof exit.broadcast === 'boolean') {
+        tags.push(exit.broadcast
+          ? tag('广播', 'warn', 'ippure：广播 IP（注册地与实际使用地不一致）')
+          : tag('原生', 'ok', 'ippure：原生 IP（注册地与实际使用地一致）'));
+      }
+      if (typeof exit.fraud_score === 'number') {
+        const cls = exit.fraud_score <= 30 ? 'ok' : exit.fraud_score <= 60 ? 'warn' : 'err';
+        tags.push(tag(`风险 ${exit.fraud_score}`, cls, 'ippure fraudScore（0–100，越低越干净）'));
+      }
       if (exit.mobile) tags.push(tag('移动网络', 'info'));
       if (exit.proxy) tags.push(tag('代理/VPN', 'warn', 'ip-api 标记为代理 / VPN / Tor 出口'));
       return tags.join(' ');

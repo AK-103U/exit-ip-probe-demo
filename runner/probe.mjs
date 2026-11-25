@@ -7,47 +7,21 @@ import { promisify } from 'node:util';
 import { aesDecrypt, hmacSign } from '../shared/crypto.mjs';
 import { isValidUuid } from '../shared/validate.mjs';
 import { buildProbeConfig, parseNodesInput } from './parser.mjs';
+import { asnNumber, buildNodeResult, CDN_ASNS, createLineBuffer, isPublicIp, summarizeCodes } from './diagnostics.mjs';
+import { buildFamilySpecs, IPPURE_HOST, probeFamily } from './exitprobe.mjs';
 import {
-  asnNumber,
-  buildNodeResult,
-  CDN_ASNS,
-  createLineBuffer,
-  ipMatchesFamily,
-  isPublicIp,
-  parseCfTrace,
-  summarizeCodes,
-} from './diagnostics.mjs';
-import { geoLookup, isCloudflareEdge, prepareEch, resolveEntry, runnerHasIpv6 } from './netinfo.mjs';
+  geoLookup,
+  isCloudflareEdge,
+  prepareEch,
+  resolveEntry,
+  resolveHostAddresses,
+  runnerHasIpv6,
+} from './netinfo.mjs';
 
 const execFileAsync = promisify(execFile);
 
 const SING_BOX_BIN = process.env.SING_BOX_BIN || 'sing-box';
 const CONCURRENCY = Number(process.env.PROBE_CONCURRENCY || 5);
-
-/**
- * Exit IP probes per address family. IP-literal endpoints force the node to egress over
- * that family; `dual` uses a dual-stack hostname to reveal which family the node prefers.
- */
-const PROBES = {
-  ipv4: {
-    family: 4,
-    primary: 'https://1.1.1.1/cdn-cgi/trace',
-    fallback: 'https://api4.ipify.org?format=json',
-    hosts: ['1.1.1.1', 'api4.ipify.org'],
-  },
-  ipv6: {
-    family: 6,
-    primary: 'https://[2606:4700:4700::1111]/cdn-cgi/trace',
-    fallback: 'https://api6.ipify.org?format=json',
-    hosts: ['2606:4700:4700::1111', 'api6.ipify.org'],
-  },
-  dual: {
-    family: 0,
-    primary: 'https://www.cloudflare.com/cdn-cgi/trace',
-    fallback: 'https://api64.ipify.org?format=json',
-    hosts: ['www.cloudflare.com', 'api64.ipify.org'],
-  },
-};
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -74,24 +48,20 @@ async function waitForPort(host, port, timeoutMs = 5000, shouldAbort = () => fal
   return false;
 }
 
-/** Never throws: returns { ok, body } or { ok: false, curlCode, message }. */
-async function curlViaSocks(port, url, timeoutSec = 10) {
+/**
+ * Never throws: returns { ok, body } or { ok: false, curlCode, message }.
+ * `connectTo` (host:port:addr:port) pins the connection to one address family while keeping
+ * the URL's hostname for SNI / Host; with SOCKS5 the pinned address is what the node dials.
+ */
+async function curlViaSocks(port, url, { timeoutSec = 10, connectTo } = {}) {
+  const args = ['-sS', '-g', '--socks5-hostname', `127.0.0.1:${port}`];
+  if (connectTo) args.push('--connect-to', connectTo);
+  args.push('--connect-timeout', String(Math.min(timeoutSec, 8)), '--max-time', String(timeoutSec), url);
   try {
-    const { stdout } = await execFileAsync(
-      'curl',
-      [
-        '-sS',
-        '-g',
-        '--socks5-hostname',
-        `127.0.0.1:${port}`,
-        '--connect-timeout',
-        String(Math.min(timeoutSec, 8)),
-        '--max-time',
-        String(timeoutSec),
-        url,
-      ],
-      { timeout: (timeoutSec + 2) * 1000, maxBuffer: 256 * 1024 },
-    );
+    const { stdout } = await execFileAsync('curl', args, {
+      timeout: (timeoutSec + 2) * 1000,
+      maxBuffer: 256 * 1024,
+    });
     return { ok: true, body: stdout };
   } catch (err) {
     const stderr = String(err?.stderr || '').trim().split(/\r?\n/).pop() || '';
@@ -103,42 +73,8 @@ async function curlViaSocks(port, url, timeoutSec = 10) {
   }
 }
 
-async function probeFamily(port, spec) {
-  const started = Date.now();
-  const attempts = [];
-
-  const trace = await curlViaSocks(port, spec.primary, 10);
-  if (trace.ok) {
-    const t = parseCfTrace(trace.body);
-    if (ipMatchesFamily(t.ip, spec.family)) {
-      return { ok: true, ip: t.ip, colo: t.colo, warp: t.warp, source: 'cf-trace', ms: Date.now() - started };
-    }
-    attempts.push({ ok: false, badResponse: true, message: 'unexpected cdn-cgi/trace response' });
-  } else {
-    attempts.push(trace);
-  }
-
-  const ipify = await curlViaSocks(port, spec.fallback, 8);
-  if (ipify.ok) {
-    let ip;
-    try {
-      ip = JSON.parse(ipify.body)?.ip;
-    } catch {
-      ip = undefined;
-    }
-    if (ipMatchesFamily(ip, spec.family)) {
-      return { ok: true, ip, source: 'ipify', ms: Date.now() - started };
-    }
-    attempts.push({ ok: false, badResponse: true, message: 'unexpected ipify response' });
-  } else {
-    attempts.push(ipify);
-  }
-
-  return { ok: false, attempts, ms: Date.now() - started };
-}
-
 /** Runs one node through sing-box and collects raw observations (not yet redacted). */
-async function probeSingleNode(node, index) {
+async function probeSingleNode(node, index, specs) {
   const socksPort = 21000 + index;
   const base = {
     index,
@@ -194,10 +130,11 @@ async function probeSingleNode(node, index) {
       };
     }
 
+    const curl = (url, opts) => curlViaSocks(socksPort, url, opts);
     const [ipv4, ipv6, dual] = await Promise.all([
-      probeFamily(socksPort, PROBES.ipv4),
-      probeFamily(socksPort, PROBES.ipv6),
-      probeFamily(socksPort, PROBES.dual),
+      probeFamily(specs.ipv4, curl),
+      probeFamily(specs.ipv6, curl),
+      probeFamily(specs.dual, curl),
     ]);
     await sleep(50);
 
@@ -249,7 +186,7 @@ async function coreVersion() {
 }
 
 /** Enriches raw probes with exact-IP geo data and turns them into redacted results. */
-async function finalizeResults(probes) {
+async function finalizeResults(probes, specs) {
   const ips = [];
   for (const p of probes) {
     ips.push(...(p.entry?.ips || []));
@@ -264,10 +201,11 @@ async function finalizeResults(probes) {
     needsIpv6Check ? runnerHasIpv6() : Promise.resolve(undefined),
   ]);
 
-  const hosts = { ipv4: PROBES.ipv4.hosts, ipv6: PROBES.ipv6.hosts };
+  const hosts = { ipv4: specs.ipv4.hosts, ipv6: specs.ipv6.hosts };
   const cdnEdges = await detectCloudflareEdges(probes, geoMap);
   const results = probes.map((p) => buildNodeResult(p, geoMap, { runnerIpv6, hosts, cdnEdges }));
-  const geoSources = [...new Set([...geoMap.values()].map((g) => g.geo_source))];
+  const usedIppure = probes.some((p) => Object.values(p.families || {}).some((f) => f?.ok && f.geo));
+  const geoSources = [...new Set([...(usedIppure ? ['ippure'] : []), ...[...geoMap.values()].map((g) => g.geo_source)])];
   return { results, runnerIpv6, geoSources };
 }
 
@@ -361,9 +299,10 @@ async function main() {
         duration_ms: Date.now() - startedAt,
       };
     } else {
-      await prepareEch(nodes);
-      const probes = await mapWithConcurrency(nodes, CONCURRENCY, probeSingleNode);
-      const { results, runnerIpv6, geoSources } = await finalizeResults(probes);
+      const [ippureAddrs] = await Promise.all([resolveHostAddresses(IPPURE_HOST), prepareEch(nodes)]);
+      const specs = buildFamilySpecs(ippureAddrs);
+      const probes = await mapWithConcurrency(nodes, CONCURRENCY, (node, i) => probeSingleNode(node, i, specs));
+      const { results, runnerIpv6, geoSources } = await finalizeResults(probes, specs);
       meta.runner_ipv6 = runnerIpv6;
       meta.geo_sources = geoSources;
       callbackPayload = {
