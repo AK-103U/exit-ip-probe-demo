@@ -8,6 +8,14 @@ export function isValidUuid(value) {
 }
 
 /**
+ * Strips leading blank lines and trailing whitespace while preserving the first line's
+ * indentation, so indented YAML pasted from a Clash `proxies:` block stays parseable.
+ */
+export function normalizeProbeInput(input) {
+  return String(input).replace(/^(?:[ \t]*\r?\n)+/, '').trimEnd();
+}
+
+/**
  * Lightweight pre-validation in CF Worker to fail fast on empty or oversized input
  * without spending Worker CPU on full YAML parsing.
  */
@@ -15,13 +23,13 @@ export function validateProbeInput(input) {
   if (typeof input !== 'string') {
     return { ok: false, error: 'input must be a string' };
   }
-  const trimmed = input.trim();
-  if (!trimmed) {
+  const normalized = normalizeProbeInput(input);
+  if (!normalized.trim()) {
     return { ok: false, error: 'input cannot be empty' };
   }
-  const byteLen = new TextEncoder().encode(trimmed).byteLength;
+  const byteLen = new TextEncoder().encode(normalized).byteLength;
   if (byteLen > MAX_INPUT_BYTES) {
     return { ok: false, error: `input exceeds ${MAX_INPUT_BYTES} bytes limit` };
   }
-  return { ok: true, value: trimmed };
+  return { ok: true, value: normalized };
 }

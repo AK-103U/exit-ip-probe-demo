@@ -25,6 +25,57 @@ function formatServerPorts(raw) {
   return mapped.length > 0 ? mapped : undefined;
 }
 
+const ECH_PEM_BEGIN = '-----BEGIN ECH CONFIGS-----';
+const ECH_PEM_END = '-----END ECH CONFIGS-----';
+const DOMAIN_RE = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}$/i;
+
+/**
+ * Converts an ECHConfigList (base64, as used by mihomo `ech-opts.config` / share links)
+ * or an existing PEM block into the line array sing-box expects in `tls.ech.config`.
+ * Returns undefined when the value is not a structurally valid ECHConfigList.
+ */
+export function echConfigToPem(raw) {
+  if (raw == null || raw === '') return undefined;
+  const text = Array.isArray(raw) ? raw.join('\n') : String(raw);
+  if (text.includes(ECH_PEM_BEGIN)) {
+    const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    return lines.includes(ECH_PEM_END) ? lines : undefined;
+  }
+  const compact = text.replace(/\s+/g, '');
+  if (!/^[A-Za-z0-9+/_-]+={0,2}$/.test(compact)) return undefined;
+  const bytes = Buffer.from(compact.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+  // ECHConfigList = uint16 length prefix || ECHConfig...
+  if (bytes.length < 4 || bytes.readUInt16BE(0) !== bytes.length - 2) return undefined;
+  return [ECH_PEM_BEGIN, bytes.toString('base64'), ECH_PEM_END];
+}
+
+/**
+ * Maps Clash/mihomo `ech-opts: { enable, config, query-server-name }` to sing-box `tls.ech`.
+ */
+export function parseEchOpts(opts) {
+  if (!opts || typeof opts !== 'object') return undefined;
+  if (!parseBool(opts.enable ?? opts.enabled)) return undefined;
+  const ech = { enabled: true };
+  const pem = echConfigToPem(opts.config);
+  if (pem) ech.config = pem;
+  const qsn = String(opts['query-server-name'] ?? opts.query_server_name ?? '').trim();
+  if (qsn && DOMAIN_RE.test(qsn)) ech.query_server_name = qsn;
+  return ech;
+}
+
+/**
+ * Share-link `ech=` parameter: either a base64 ECHConfigList, or a domain whose DNS HTTPS
+ * record carries the config (Xray style `domain+https://doh/...` is accepted, DoH part ignored).
+ */
+function echFromUriParam(value) {
+  if (!value) return undefined;
+  const v = String(value).trim();
+  if (echConfigToPem(v)) return { enable: true, config: v };
+  const domain = v.split('+')[0].trim();
+  if (DOMAIN_RE.test(domain)) return { enable: true, 'query-server-name': domain };
+  return undefined;
+}
+
 function buildTls(opts = {}) {
   const enabled = opts.enabled ?? true;
   if (!enabled) return undefined;
@@ -42,6 +93,9 @@ function buildTls(opts = {}) {
       public_key: String(opts.reality.publicKey),
       short_id: opts.reality.shortId ? String(opts.reality.shortId) : '',
     };
+  } else if (opts.ech) {
+    // REALITY and ECH are mutually exclusive; REALITY wins when both are present.
+    tls.ech = opts.ech;
   }
   if (opts.utlsFingerprint) {
     tls.utls = { enabled: true, fingerprint: String(opts.utlsFingerprint) };
@@ -100,6 +154,7 @@ function clashProxyToSingBox(proxy, idx) {
         serverName: proxy.sni || proxy.servername || server,
         insecure: parseBool(proxy['skip-cert-verify']),
         alpn: proxy.alpn,
+        ech: parseEchOpts(proxy['ech-opts']),
       }),
     };
     if (Number.isInteger(port) && port > 0) {
@@ -138,6 +193,7 @@ function clashProxyToSingBox(proxy, idx) {
         serverName: proxy.sni || proxy.servername || server,
         insecure: parseBool(proxy['skip-cert-verify']),
         alpn: proxy.alpn,
+        ech: parseEchOpts(proxy['ech-opts']),
         utlsFingerprint: proxy['client-fingerprint'],
       }),
     };
@@ -169,6 +225,7 @@ function clashProxyToSingBox(proxy, idx) {
         serverName: proxy.servername || proxy.sni || server,
         insecure: parseBool(proxy['skip-cert-verify']),
         alpn: proxy.alpn,
+        ech: parseEchOpts(proxy['ech-opts']),
         utlsFingerprint: proxy['client-fingerprint'] || (realityOpts['public-key'] ? 'chrome' : undefined),
         reality: realityOpts['public-key']
           ? { publicKey: realityOpts['public-key'], shortId: realityOpts['short-id'] || '' }
@@ -202,6 +259,7 @@ function clashProxyToSingBox(proxy, idx) {
         serverName: proxy.servername || proxy.sni || server,
         insecure: parseBool(proxy['skip-cert-verify']),
         alpn: proxy.alpn,
+        ech: parseEchOpts(proxy['ech-opts']),
       });
     }
     const transport = buildTransport(proxy.network, {
@@ -246,6 +304,7 @@ function clashProxyToSingBox(proxy, idx) {
           serverName: proxy.sni || proxy.servername || server,
           insecure: parseBool(proxy['skip-cert-verify']),
           alpn: proxy.alpn || ['h3'],
+          ech: parseEchOpts(proxy['ech-opts']),
         }),
       },
     };
@@ -319,6 +378,7 @@ function uriToSingBox(line, idx) {
         obfs: q.get('obfs') || undefined,
         'obfs-password': q.get('obfs-password') || undefined,
         alpn: q.get('alpn') || undefined,
+        'ech-opts': echFromUriParam(q.get('ech')),
       },
       idx,
     );
@@ -338,6 +398,7 @@ function uriToSingBox(line, idx) {
         'ws-opts': q.get('type') === 'ws' ? { path: q.get('path'), headers: q.get('host') ? { Host: q.get('host') } : undefined } : undefined,
         'grpc-opts': q.get('type') === 'grpc' ? { 'grpc-service-name': q.get('serviceName') } : undefined,
         alpn: q.get('alpn') || undefined,
+        'ech-opts': echFromUriParam(q.get('ech')),
       },
       idx,
     );
@@ -363,6 +424,7 @@ function uriToSingBox(line, idx) {
         'ws-opts': net === 'ws' ? { path: q.get('path'), headers: q.get('host') ? { Host: q.get('host') } : undefined } : undefined,
         'grpc-opts': net === 'grpc' ? { 'grpc-service-name': q.get('serviceName') } : undefined,
         alpn: q.get('alpn') || undefined,
+        'ech-opts': echFromUriParam(q.get('ech')),
       },
       idx,
     );
@@ -408,18 +470,75 @@ function uriToSingBox(line, idx) {
 
 const URI_PREFIX_RE = /^(hysteria2|hy2|vless|vmess|trojan|ss|tuic):\/\//i;
 
+const indentOf = (line) => line.match(/^[ \t]*/)[0].length;
+
+/** Removes the common leading indentation of all non-blank lines (like Python textwrap.dedent). */
+export function dedent(text) {
+  const lines = String(text).split(/\r?\n/);
+  const indents = lines.filter((l) => l.trim()).map(indentOf);
+  const min = indents.length > 0 ? Math.min(...indents) : 0;
+  if (min === 0) return lines.join('\n');
+  return lines.map((l) => l.slice(Math.min(min, indentOf(l)))).join('\n');
+}
+
+/**
+ * Candidate repairs for YAML whose first line lost its indentation because a caller applied
+ * trim() to an indented paste (e.g. items copied from under `proxies:` in a Clash config).
+ */
+function firstLineIndentRepairs(text) {
+  const lines = String(text).split(/\r?\n/);
+  if (indentOf(lines[0]) !== 0 || !/^-\s/.test(lines[0])) return [];
+  const rest = lines.slice(1).filter((l) => l.trim());
+  if (rest.length === 0) return [];
+
+  const targets = new Set();
+  const siblingIndents = rest.filter((l) => /^[ \t]*-\s/.test(l)).map(indentOf);
+  if (siblingIndents.length > 0) targets.add(Math.min(...siblingIndents));
+  // Block-style single item: "- name: a" whose keys sit two columns deeper than the dash.
+  targets.add(Math.min(...rest.map(indentOf)) - 2);
+
+  return [...targets]
+    .filter((n) => n > 0)
+    .map((n) => dedent([' '.repeat(n) + lines[0], ...lines.slice(1)].join('\n')));
+}
+
+function yamlProxyList(text) {
+  let parsed;
+  try {
+    parsed = yaml.load(text);
+  } catch {
+    return [];
+  }
+  if (Array.isArray(parsed)) return parsed;
+  if (parsed && typeof parsed === 'object') {
+    if (Array.isArray(parsed.proxies)) return parsed.proxies;
+    if (parsed.server && parsed.type) return [parsed];
+  }
+  return [];
+}
+
+function convertClashList(rawList) {
+  return rawList
+    .slice(0, MAX_NODES_PER_TASK)
+    .map((item, i) => clashProxyToSingBox(item, i))
+    .filter(Boolean);
+}
+
 /**
  * Parses Clash YAML (full config, proxy list, or flow object), URI lines,
  * or Base64 subscription text into normalized sing-box outbound entries.
+ * Indented pastes are accepted, including ones whose first line was already trimmed.
  */
 export function parseNodesInput(rawInput) {
-  let text = String(rawInput || '').trim();
-  if (!text) return [];
+  // Drop leading blank lines and trailing whitespace but keep the first line's indentation.
+  let text = String(rawInput || '').replace(/^(?:[ \t]*\r?\n)+/, '').trimEnd();
+  if (!text.trim()) return [];
 
   // Try base64-encoded subscription body if it looks like a single opaque token
-  if (!text.includes('://') && !text.includes(':') && !text.includes('{') && /^[A-Za-z0-9+/=_-]+$/.test(text)) {
+  const compact = text.trim();
+  if (!compact.includes('://') && !compact.includes(':') && !compact.includes('{') && /^[A-Za-z0-9+/=_-]+$/.test(compact)) {
     try {
-      const decoded = decodeBase64Flexible(text).trim();
+      const decoded = decodeBase64Flexible(compact).trim();
       if (decoded.includes('://') || decoded.includes('proxies:')) {
         text = decoded;
       }
@@ -436,30 +555,13 @@ export function parseNodesInput(rawInput) {
       .filter(Boolean);
   }
 
-  let parsed;
-  try {
-    parsed = yaml.load(text);
-  } catch {
-    parsed = null;
+  // Pick the YAML reading that yields the most usable nodes.
+  let best = [];
+  for (const candidate of [dedent(text), ...firstLineIndentRepairs(text)]) {
+    const nodes = convertClashList(yamlProxyList(candidate));
+    if (nodes.length > best.length) best = nodes;
   }
-
-  let rawList = [];
-  if (Array.isArray(parsed)) {
-    rawList = parsed;
-  } else if (parsed && typeof parsed === 'object') {
-    if (Array.isArray(parsed.proxies)) {
-      rawList = parsed.proxies;
-    } else if (parsed.server && parsed.type) {
-      rawList = [parsed];
-    }
-  }
-
-  if (rawList.length > 0) {
-    return rawList
-      .slice(0, MAX_NODES_PER_TASK)
-      .map((item, i) => clashProxyToSingBox(item, i))
-      .filter(Boolean);
-  }
+  if (best.length > 0) return best;
 
   // Mixed lines fallback: pick any URI lines
   return lines
