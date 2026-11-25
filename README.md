@@ -72,6 +72,7 @@ pnpm run dev
 - Clash YAML：完整配置（含 `proxies:`）、节点列表，或单行 `- { name: ..., type: ... }`。直接从 `proxies:` 下复制的带缩进内容可以原样粘贴。
 - 分享链接：`hysteria2://` / `hy2://` / `vless://` / `vmess://` / `trojan://` / `ss://` / `tuic://`，每行一个；也支持 Base64 订阅正文。
 - ECH：支持 Clash `ech-opts: { enable, config, query-server-name }` 和分享链接的 `ech=` 参数。未内置 `config` 时，Runner 会通过 DoH（Cloudflare，失败时改用 Google）查询 HTTPS 记录拿到 ECH 配置再交给 sing-box，不依赖 Runner 系统解析器。REALITY 节点会忽略 ECH。
+- 前置节点（链式代理）：在节点上加 mihomo 的 `dialer-proxy: <前置节点名>`，前置节点也要写在同一次输入里，Runner 会把它映射为 sing-box 的 `detour`，最多支持 3 层。适用于 Runner 直连不通的入口，例如只有 IPv6 的入口（GitHub Runner 没有 IPv6）、只放行特定来源 IP 的入口。结果中的 `via` 字段是前置节点名；前置节点不存在或链路成环时，报 `chain_invalid`。
 
 ## 探测结果
 

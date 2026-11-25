@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { aesDecrypt, hmacSign } from '../shared/crypto.mjs';
 import { isValidUuid } from '../shared/validate.mjs';
-import { parseNodesInput } from './parser.mjs';
+import { buildProbeConfig, parseNodesInput } from './parser.mjs';
 import {
   asnNumber,
   buildNodeResult,
@@ -140,16 +140,31 @@ async function probeFamily(port, spec) {
 /** Runs one node through sing-box and collects raw observations (not yet redacted). */
 async function probeSingleNode(node, index) {
   const socksPort = 21000 + index;
-  const cfgPath = join(tmpdir(), `sb-probe-${process.pid}-${index}.json`);
-  const config = {
-    // Captured in memory only (never printed) so failures can be classified.
-    log: { level: 'warn', timestamp: false },
-    inbounds: [{ type: 'socks', tag: 'socks-in', listen: '127.0.0.1', listen_port: socksPort }],
-    outbounds: [node.outbound],
+  const base = {
+    index,
+    name: node.name,
+    type: node.type,
+    outbound: node.outbound,
+    chain: node.chain,
+    via: node.via,
+    ech: node.ech,
   };
-  writeFileSync(cfgPath, JSON.stringify(config), { mode: 0o600 });
 
-  const base = { index, name: node.name, type: node.type, outbound: node.outbound, ech: node.ech };
+  if (node.chainError) {
+    return {
+      ...base,
+      entry: await resolveEntry(node.outbound.server),
+      coreFailure: 'chain_invalid',
+      coreFailureDetail: node.chainError,
+      coreLines: [],
+      latency_ms: 0,
+    };
+  }
+
+  const cfgPath = join(tmpdir(), `sb-probe-${process.pid}-${index}.json`);
+  // Logs are captured in memory only (never printed) so failures can be classified.
+  writeFileSync(cfgPath, JSON.stringify(buildProbeConfig(node, socksPort)), { mode: 0o600 });
+
   const entryPromise = resolveEntry(node.outbound.server);
   const logs = createLineBuffer(80);
   const startedAt = Date.now();

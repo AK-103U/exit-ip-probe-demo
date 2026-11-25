@@ -517,11 +517,74 @@ function yamlProxyList(text) {
   return [];
 }
 
+const MAX_CHAIN_DEPTH = 3;
+
 function convertClashList(rawList) {
-  return rawList
+  const nodes = rawList
     .slice(0, MAX_NODES_PER_TASK)
-    .map((item, i) => clashProxyToSingBox(item, i))
+    .map((item, i) => {
+      const node = clashProxyToSingBox(item, i);
+      const via = item && typeof item === 'object' ? item['dialer-proxy'] : undefined;
+      if (node && via != null && String(via).trim()) node.via = String(via).trim();
+      return node;
+    })
     .filter(Boolean);
+  return resolveChains(nodes);
+}
+
+/**
+ * mihomo `dialer-proxy: <name>` → sing-box `detour`. The front proxy must be another node in
+ * the same input; its outbound (and its own fronts, up to MAX_CHAIN_DEPTH) are attached as
+ * `node.chain` so the probe config can include them. Unresolvable or cyclic chains are kept
+ * with `node.chainError` so they are reported instead of silently probed without the front.
+ */
+export function resolveChains(nodes) {
+  const byName = new Map();
+  for (const n of nodes) if (!byName.has(n.name)) byName.set(n.name, n);
+
+  for (const node of nodes) {
+    if (!node.via) continue;
+    const chain = [];
+    const seen = new Set([node.name]);
+    let cur = node;
+    let error;
+    while (cur.via) {
+      const front = byName.get(cur.via);
+      if (!front) {
+        error = `dialer-proxy "${cur.via}" not found in input`;
+        break;
+      }
+      if (seen.has(front.name) || chain.length >= MAX_CHAIN_DEPTH) {
+        error = 'dialer-proxy chain is cyclic or too deep';
+        break;
+      }
+      seen.add(front.name);
+      chain.push(front.outbound);
+      cur = front;
+    }
+    if (error) {
+      node.chainError = error;
+      continue;
+    }
+    node.chain = chain;
+  }
+
+  // Wire detours only after every chain validated, so a broken front never leaves a dangling tag.
+  for (const node of nodes) {
+    if (node.via && !node.chainError) {
+      node.outbound.detour = byName.get(node.via).outbound.tag;
+    }
+  }
+  return nodes;
+}
+
+/** sing-box config for probing one node through a loopback-only SOCKS inbound. */
+export function buildProbeConfig(node, socksPort, logLevel = 'warn') {
+  return {
+    log: { level: logLevel, timestamp: false },
+    inbounds: [{ type: 'socks', tag: 'socks-in', listen: '127.0.0.1', listen_port: socksPort }],
+    outbounds: [node.outbound, ...(node.chain || [])],
+  };
 }
 
 /**

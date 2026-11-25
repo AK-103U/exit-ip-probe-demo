@@ -74,6 +74,7 @@ export function redact(text, sensitive = []) {
 
 export const HINTS = {
   core_spawn_failed: '代理内核无法启动（Runner 上缺少 sing-box）',
+  chain_invalid: '前置节点（dialer-proxy）无效：找不到同名节点，或链路成环 / 超过 3 层',
   core_start_failed: '代理内核启动失败：节点参数无效或当前内核不支持',
   auth_failed: '认证失败：密码 / UUID 错误，或账号已到期',
   reality_failed: 'REALITY 校验失败：public-key / short-id / SNI 不匹配',
@@ -284,13 +285,17 @@ function exitRecord(probe, geoMap, entryIps) {
 export function buildNodeResult(probe, geoMap = new Map(), ctx = {}) {
   const { outbound = {}, entry = { ips: [] }, families = {}, coreLines = [] } = probe;
   const entryIps = entry.ips || [];
-  const sensitive = collectSensitive(outbound, entryIps);
+  // Front proxies (dialer-proxy) carry credentials too; redact them as well.
+  const sensitive = [outbound, ...(probe.chain || [])]
+    .flatMap((ob, i) => collectSensitive(ob, i === 0 ? entryIps : []))
+    .sort((a, b) => b[0].length - a[0].length);
   const echEnabled = Boolean(outbound.tls?.ech?.enabled);
 
   const base = {
     index: probe.index,
     name: probe.name,
     type: probe.type,
+    via: probe.via || undefined,
     ech: probe.ech || undefined,
     latency_ms: probe.latency_ms,
     timings: probe.timings,

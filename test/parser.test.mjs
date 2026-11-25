@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { dedent, echConfigToPem, parseEchOpts, parseNodesInput } from '../runner/parser.mjs';
+import { buildProbeConfig, dedent, echConfigToPem, parseEchOpts, parseNodesInput } from '../runner/parser.mjs';
 
 test('parses Clash YAML single flow line for hysteria2 with port hopping', () => {
   const line =
@@ -163,4 +163,50 @@ test('supports ech= in share links (domain, Xray domain+DoH, and base64 config)'
   assert.deepEqual(nodes[0].outbound.tls.ech, { enabled: true, query_server_name: 'cloudflare-ech.com' });
   assert.deepEqual(nodes[1].outbound.tls.ech, { enabled: true, query_server_name: 'cloudflare-ech.com' });
   assert.deepEqual(nodes[2].outbound.tls.ech.config[1], b64);
+});
+
+// ---------- dialer-proxy (front / chained proxy) ----------
+
+test('dialer-proxy chains a node through a front node via sing-box detour', () => {
+  const input = [
+    '    - { name: Front, type: hysteria2, server: 198.51.100.10, port: 443, password: fp }',
+    '    - { name: V6-A, type: trojan, server: v6.example.com, port: 54357, password: tp, dialer-proxy: Front }',
+    '    - { name: V6-B, type: trojan, server: v6.example.com, port: 54258, password: tp, dialer-proxy: Front }',
+  ].join('\n');
+  const nodes = parseNodesInput(input);
+  const [front, a, b] = nodes;
+  assert.equal(front.via, undefined);
+  assert.equal(front.outbound.detour, undefined);
+  assert.equal(a.via, 'Front');
+  assert.equal(a.outbound.detour, front.outbound.tag);
+  assert.deepEqual(a.chain, [front.outbound]);
+  assert.equal(b.outbound.detour, front.outbound.tag);
+
+  const cfg = buildProbeConfig(a, 21001);
+  assert.deepEqual(cfg.outbounds.map((o) => o.tag), [a.outbound.tag, front.outbound.tag]);
+  assert.equal(cfg.inbounds[0].listen, '127.0.0.1');
+  assert.equal(cfg.inbounds[0].listen_port, 21001);
+  assert.deepEqual(buildProbeConfig(front, 21000).outbounds, [front.outbound]);
+});
+
+test('dialer-proxy supports multi-hop chains and rejects missing or cyclic fronts', () => {
+  const nodes = parseNodesInput(
+    [
+      '- { name: Hop1, type: ss, server: 198.51.100.1, port: 8388, cipher: aes-128-gcm, password: a }',
+      '- { name: Hop2, type: ss, server: 198.51.100.2, port: 8388, cipher: aes-128-gcm, password: b, dialer-proxy: Hop1 }',
+      '- { name: Target, type: trojan, server: t.example.com, port: 443, password: c, dialer-proxy: Hop2 }',
+      '- { name: Orphan, type: trojan, server: t.example.com, port: 443, password: c, dialer-proxy: Missing }',
+      '- { name: LoopA, type: trojan, server: t.example.com, port: 443, password: c, dialer-proxy: LoopB }',
+      '- { name: LoopB, type: trojan, server: t.example.com, port: 443, password: c, dialer-proxy: LoopA }',
+    ].join('\n'),
+  );
+  const by = Object.fromEntries(nodes.map((n) => [n.name, n]));
+  assert.deepEqual(by.Target.chain.map((o) => o.tag), [by.Hop2.outbound.tag, by.Hop1.outbound.tag]);
+  assert.equal(by.Hop2.outbound.detour, by.Hop1.outbound.tag);
+  assert.equal(by.Target.outbound.detour, by.Hop2.outbound.tag);
+
+  assert.match(by.Orphan.chainError, /not found/);
+  assert.equal(by.Orphan.outbound.detour, undefined, 'no dangling detour tag');
+  assert.match(by.LoopA.chainError, /cyclic/);
+  assert.match(by.LoopB.chainError, /cyclic/);
 });

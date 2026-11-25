@@ -228,3 +228,40 @@ test('a verified Cloudflare edge entry (BYOIP / 优选 IP) is reported as cdn, n
   assert.equal(result.entry.cdn, true);
   assert.equal(result.entry.cdn_edge, 'cloudflare');
 });
+
+test('chained nodes report their front and redact the front proxy credentials too', () => {
+  const front = { type: 'hysteria2', tag: 'proxy-0', server: 'front.example.com', password: 'FRONT-SECRET-PW', tls: { enabled: true } };
+  const target = { type: 'trojan', tag: 'proxy-1', server: 'v6.example.com', password: 'TARGET-SECRET', detour: 'proxy-0' };
+  const failed = buildNodeResult(
+    {
+      index: 1,
+      name: 'V6',
+      type: 'trojan',
+      outbound: target,
+      chain: [front],
+      via: 'Front',
+      entry: { ips: ['2001:db8::5'] },
+      families: { ipv4: { ok: false, attempts: [] }, ipv6: { ok: false, attempts: [] }, dual: { ok: false, attempts: [] } },
+      coreLines: ['ERROR connection: dial front.example.com FRONT-SECRET-PW then v6.example.com TARGET-SECRET: connection refused'],
+    },
+    new Map(),
+  );
+  assert.equal(failed.via, 'Front');
+  assert.equal(failed.error_code, 'connection_refused');
+  for (const leak of ['FRONT-SECRET-PW', 'TARGET-SECRET', 'front.example.com', 'v6.example.com']) {
+    assert.equal(failed.detail.includes(leak), false, leak);
+  }
+
+  const invalid = buildNodeResult({
+    index: 2,
+    name: 'Orphan',
+    type: 'trojan',
+    outbound: target,
+    entry: { ips: [] },
+    coreFailure: 'chain_invalid',
+    coreFailureDetail: 'dialer-proxy "Missing" not found in input',
+    coreLines: [],
+  });
+  assert.equal(invalid.error_code, 'chain_invalid');
+  assert.match(invalid.detail, /Missing/);
+});

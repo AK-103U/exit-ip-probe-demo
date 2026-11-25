@@ -184,7 +184,7 @@
       </div>
       <textarea
         id="input"
-        placeholder="粘贴 Clash YAML 节点行（如 - { name: ..., type: hysteria2, ... }）或分享链接（hysteria2:// / vless:// / trojan:// / ss:// / vmess:// / tuic://，每行一个）"
+        placeholder="粘贴 Clash YAML 节点行（如 - { name: ..., type: hysteria2, ... }）或分享链接（hysteria2:// / vless:// / trojan:// / ss:// / vmess:// / tuic://，每行一个）；需要前置节点时在节点上加 dialer-proxy: 前置节点名"
       ></textarea>
       <div class="actions">
         <button id="submitBtn">开始探测</button>
@@ -330,7 +330,7 @@
       resultCard.classList.remove('hidden');
       resultBody.innerHTML = results.map((item, idx) => `<tr>
           <td>${idx + 1}</td>
-          <td>${escapeHtml(item.name || '-')}<div class="sub"><code>${escapeHtml(item.type || '-')}</code></div></td>
+          <td>${escapeHtml(item.name || '-')}<div class="sub"><code>${escapeHtml(item.type || '-')}</code></div>${item.via ? `<div class="sub" title="dialer-proxy：经前置节点连接">经 ${escapeHtml(item.via)}</div>` : ''}</td>
           <td>${exitsCell(item)}</td>
           <td>${relationCell(item)}</td>
           <td>${timingCell(item)}</td>
