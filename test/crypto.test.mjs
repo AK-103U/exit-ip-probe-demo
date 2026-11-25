@@ -7,7 +7,7 @@ test('AES-256-GCM encrypts and decrypts UTF-8 payloads', async () => {
   const key = randomBytes(32).toString('base64');
   const payload = JSON.stringify({
     task_id: '11111111-1111-4111-8111-111111111111',
-    raw_input: '🇭🇰【亚洲】香港01丨直连 password=88eae789-cb73-4b64-bd70-65ee1c60b262',
+    raw_input: '🇭🇰【亚洲】香港01丨直连 password=fake-password-for-test',
   });
 
   const cipher1 = await aesEncrypt(payload, key);
