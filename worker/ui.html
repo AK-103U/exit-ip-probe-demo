@@ -33,6 +33,7 @@
       gap: 16px;
     }
     .card {
+      min-width: 0; /* let wide tables scroll inside .table-wrap instead of widening the grid */
       background: var(--card);
       border: 1px solid var(--border);
       border-radius: 12px;
@@ -132,6 +133,43 @@
       border: 1px solid var(--border);
     }
     .hidden { display: none; }
+    .table-wrap { overflow-x: auto; }
+    .table-wrap table { min-width: 760px; }
+    .ip-line { display: flex; align-items: center; gap: 6px; }
+    .fam { font-size: 11px; color: var(--muted); width: 18px; flex: none; }
+    .exit + .exit { margin-top: 8px; }
+    .exit-geo { padding-left: 24px; font-size: 12px; color: var(--muted); margin-top: 2px; }
+    .exit-geo .tag { margin-left: 2px; }
+    .nowrap { white-space: nowrap; }
+    .tag {
+      display: inline-block;
+      font-size: 11px;
+      line-height: 1.6;
+      padding: 0 6px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .tag.ok { color: var(--ok); border-color: rgba(16, 185, 129, 0.4); }
+    .tag.warn { color: var(--warn); border-color: rgba(245, 158, 11, 0.4); }
+    .tag.err { color: var(--err); border-color: rgba(239, 68, 68, 0.4); }
+    .tag.info { color: #93c5fd; border-color: rgba(59, 130, 246, 0.4); }
+    .sub { font-size: 12px; color: var(--muted); }
+    .err-code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; color: var(--err); }
+    details summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+    details pre {
+      white-space: pre-wrap;
+      word-break: break-all;
+      font-size: 12px;
+      margin: 6px 0 0;
+      padding: 8px;
+      background: #0b101b;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+    }
+    a { color: #93c5fd; }
+    .meta-line { margin-top: 10px; font-size: 12px; color: var(--muted); }
   </style>
 </head>
 <body>
@@ -155,20 +193,22 @@
     </div>
 
     <div id="resultCard" class="card hidden">
-      <table>
-        <thead>
-          <tr>
-            <th>#</th>
-            <th>节点</th>
-            <th>协议</th>
-            <th>落地 IP</th>
-            <th>归属地 / ISP</th>
-            <th>耗时</th>
-            <th>状态</th>
-          </tr>
-        </thead>
-        <tbody id="resultBody"></tbody>
-      </table>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>节点</th>
+              <th>落地出口（IP · 归属 · 网络）</th>
+              <th>入口关系</th>
+              <th>耗时</th>
+              <th>状态</th>
+            </tr>
+          </thead>
+          <tbody id="resultBody"></tbody>
+        </table>
+      </div>
+      <div id="metaLine" class="meta-line"></div>
     </div>
   </div>
 
@@ -179,6 +219,7 @@
     const statusEl = document.getElementById('status');
     const resultCard = document.getElementById('resultCard');
     const resultBody = document.getElementById('resultBody');
+    const metaLine = document.getElementById('metaLine');
 
     const savedToken = sessionStorage.getItem('probe_api_token');
     if (savedToken) tokenEl.value = savedToken;
@@ -198,23 +239,112 @@
         .replace(/"/g, '&quot;');
     }
 
-    function renderResults(results) {
+    const RELATION = {
+      direct: ['直连', 'ok', '入口 IP 即落地 IP'],
+      same_network: ['同网段', 'info', '入口与落地同属一个 ASN，但 IP 不同（多 IP 出口或同机房转发）'],
+      relay: ['中转', 'warn', '入口与落地属于不同网络（中转 / 隧道 / 分离出口）'],
+      cdn: ['CDN', 'info', '入口是 CDN 边缘节点，落地是后端服务器'],
+      unknown: ['未知', '', '缺少入口或落地信息'],
+    };
+    const ECH_LABEL = { doh: 'ECH·DoH', inline: 'ECH·内置', dns: 'ECH·DNS' };
+
+    function tag(text, cls = '', title = '') {
+      return `<span class="tag ${cls}"${title ? ` title="${escapeHtml(title)}"` : ''}>${escapeHtml(text)}</span>`;
+    }
+
+    function exitTags(exit) {
+      const tags = [];
+      if (exit.warp) tags.push(tag('WARP', 'info', '经 Cloudflare WARP 出口'));
+      if (exit.hosting === true) tags.push(tag('机房', 'warn', 'ip-api 标记为托管 / 数据中心 IP'));
+      if (exit.hosting === false && !exit.warp) tags.push(tag('非机房', 'ok', 'ip-api 未标记为数据中心 IP（疑似住宅 / 原生）'));
+      if (exit.mobile) tags.push(tag('移动网络', 'info'));
+      if (exit.proxy) tags.push(tag('代理/VPN', 'warn', 'ip-api 标记为代理 / VPN / Tor 出口'));
+      return tags.join(' ');
+    }
+
+    function exitBlock(fam, item) {
+      const label = fam === 'ipv4' ? 'v4' : 'v6';
+      const exit = item[fam];
+      if (!exit) {
+        const code = item.family_errors?.[fam]?.code || '';
+        return `<div class="exit"><div class="ip-line"><span class="fam">${label}</span>
+          <span class="sub" title="${escapeHtml(code)}">无 ${fam === 'ipv4' ? 'IPv4' : 'IPv6'} 出口</span></div></div>`;
+      }
+      const pref = item.preferred === fam ? tag('默认', 'ok', '访问双栈网站时优先走这个出口') : '';
+      const place = [exit.country_code || exit.country, exit.city || exit.region].filter(Boolean).join(' · ');
+      const net = [exit.isp || exit.org, exit.asn ? exit.asn.split(' ')[0] : ''].filter(Boolean).join(' · ');
+      const geo = [place, net].filter(Boolean).join(' · ') || '归属未知';
+      return `<div class="exit">
+        <div class="ip-line"><span class="fam">${label}</span><code>${escapeHtml(exit.ip)}</code>${pref}</div>
+        <div class="exit-geo">${escapeHtml(geo)} ${exitTags(exit)}</div>
+      </div>`;
+    }
+
+    function exitsCell(item) {
+      if (!item.ok) return '-';
+      if (!('ipv4' in item) && !('ipv6' in item)) {
+        // Results from an older Runner: single exit IP with best-effort geo.
+        const geo = [item.country, item.city, item.isp].filter(Boolean).join(' · ');
+        return `<code>${escapeHtml(item.exit_ip || '-')}</code><div class="sub">${escapeHtml(geo)}</div>`;
+      }
+      return exitBlock('ipv4', item) + exitBlock('ipv6', item);
+    }
+
+    function relationCell(item) {
+      const entryIps = item.entry?.ips || [];
+      const entryLine = entryIps.length
+        ? `<div class="sub">入口 ${entryIps.slice(0, 2).map(escapeHtml).join(', ')}${entryIps.length > 2 ? ' …' : ''}</div>`
+        : item.entry?.error ? `<div class="sub">入口解析失败 (${escapeHtml(item.entry.error)})</div>` : '';
+      if (!item.ok) return entryLine || '-';
+      const [label, cls, title] = RELATION[item.relation] || RELATION.unknown;
+      return `${tag(label, cls, title)}${entryLine}`;
+    }
+
+    function statusCell(item) {
+      const ech = item.ech ? ' ' + tag(ECH_LABEL[item.ech] || 'ECH', 'info', 'ECH 配置来源') : '';
+      if (item.ok) return `<span class="status ok">成功</span>${ech}`;
+      const detail = item.detail
+        ? `<details><summary>详情</summary><pre>${escapeHtml(item.detail)}</pre></details>`
+        : '';
+      return `<div class="err-code">${escapeHtml(item.error_code || 'failed')}</div>
+        <div class="status err" style="font-size:12px">${escapeHtml(item.error || '失败')}</div>${ech}${detail}`;
+    }
+
+    function timingCell(item) {
+      if (item.latency_ms == null) return '-';
+      const t = item.timings || {};
+      const parts = [
+        t.core_ready_ms != null ? `内核就绪 ${t.core_ready_ms}ms` : '',
+        t.ipv4_ms != null ? `IPv4 ${t.ipv4_ms}ms` : '',
+        t.ipv6_ms != null ? `IPv6 ${t.ipv6_ms}ms` : '',
+        t.dual_ms != null ? `双栈 ${t.dual_ms}ms` : '',
+      ].filter(Boolean).join('\n');
+      return `<span class="nowrap" title="${escapeHtml(parts)}">${item.latency_ms} ms</span>`;
+    }
+
+    function renderResults(data) {
+      const results = data.results || [];
       resultCard.classList.remove('hidden');
-      resultBody.innerHTML = results.map((item, idx) => {
-        const geo = [item.country, item.city, item.isp || item.asn].filter(Boolean).join(' · ') || '-';
-        const stateHtml = item.ok
-          ? '<span class="status ok">成功</span>'
-          : `<span class="status err">${escapeHtml(item.error || '失败')}</span>`;
-        return `<tr>
+      resultBody.innerHTML = results.map((item, idx) => `<tr>
           <td>${idx + 1}</td>
-          <td>${escapeHtml(item.name || '-')}</td>
-          <td><code>${escapeHtml(item.type || '-')}</code></td>
-          <td>${item.exit_ip ? `<code>${escapeHtml(item.exit_ip)}</code>` : '-'}</td>
-          <td>${escapeHtml(geo)}</td>
-          <td>${item.latency_ms != null ? `${item.latency_ms} ms` : '-'}</td>
-          <td>${stateHtml}</td>
-        </tr>`;
-      }).join('');
+          <td>${escapeHtml(item.name || '-')}<div class="sub"><code>${escapeHtml(item.type || '-')}</code></div></td>
+          <td>${exitsCell(item)}</td>
+          <td>${relationCell(item)}</td>
+          <td>${timingCell(item)}</td>
+          <td>${statusCell(item)}</td>
+        </tr>`).join('');
+      renderMeta(data);
+    }
+
+    function renderMeta(data) {
+      const m = data.meta || {};
+      const parts = [];
+      if (data.run_url) parts.push(`<a href="${escapeHtml(data.run_url)}" target="_blank" rel="noopener">GitHub Actions 运行记录</a>`);
+      if (m.core_version) parts.push(`内核 ${escapeHtml(m.core)} ${escapeHtml(m.core_version)}`);
+      if (m.runner_ipv6 === false) parts.push('Runner 无 IPv6');
+      if (Array.isArray(m.geo_sources) && m.geo_sources.length) parts.push(`归属地来源 ${m.geo_sources.map(escapeHtml).join(' / ')}`);
+      if (typeof data.duration_ms === 'number') parts.push(`Runner 探测耗时 ${data.duration_ms} ms`);
+      metaLine.innerHTML = parts.join(' · ');
     }
 
     async function pollResult(taskId, token, startedAt) {
@@ -236,15 +366,21 @@
           submitBtn.disabled = false;
           return;
         }
-        if (data.status === 'queued') {
-          setStatus(`GitHub Runner 执行中… 已等待 ${elapsedSec}s`, 'warn');
+        if (data.status === 'queued' || data.status === 'running') {
+          const phase = data.status === 'running'
+            ? 'Runner 已领取任务，正在探测…'
+            : '等待 GitHub Runner 启动…';
+          setStatus(`${phase} 已等待 ${elapsedSec}s`, 'warn');
+          if (data.run_url) {
+            statusEl.insertAdjacentHTML('beforeend', ` <a href="${escapeHtml(data.run_url)}" target="_blank" rel="noopener">查看运行</a>`);
+          }
           pollTimer = setTimeout(() => pollResult(taskId, token, startedAt), 2500);
           return;
         }
         if (data.status === 'done') {
           const okCount = (data.results || []).filter((r) => r.ok).length;
           setStatus(`完成：${okCount}/${(data.results || []).length} 成功（总耗时 ${elapsedSec}s）`, 'ok');
-          renderResults(data.results || []);
+          renderResults(data);
           submitBtn.disabled = false;
           return;
         }
@@ -259,9 +395,10 @@
     submitBtn.addEventListener('click', async () => {
       if (pollTimer) clearTimeout(pollTimer);
       const token = tokenEl.value.trim();
-      const input = inputEl.value.trim();
+      // Keep indentation: only drop leading blank lines and trailing whitespace.
+      const input = inputEl.value.replace(/^(?:[ \t]*\r?\n)+/, '').trimEnd();
       if (!token) return setStatus('请输入 API_TOKEN', 'err');
-      if (!input) return setStatus('请输入节点配置', 'err');
+      if (!input.trim()) return setStatus('请输入节点配置', 'err');
 
       sessionStorage.setItem('probe_api_token', token);
       submitBtn.disabled = true;

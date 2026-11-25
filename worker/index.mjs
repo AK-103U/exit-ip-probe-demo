@@ -174,7 +174,49 @@ async function handleInternalPull(request, env, url) {
 
   // Burn after read so each task_id can only be pulled once.
   await env.PROBE_KV.delete(payloadKey);
+
+  // Observability: the task is now owned by a Runner; expose the (public) Actions run link.
+  const resultKey = `result:${taskId}`;
+  const runId = parseRunId(request.headers.get('X-Run-Id'));
+  const existing = await readJson(env.PROBE_KV, resultKey);
+  await env.PROBE_KV.put(
+    resultKey,
+    JSON.stringify({
+      ...(existing || { task_id: taskId }),
+      status: 'running',
+      started_at: Date.now(),
+      run_id: runId,
+      run_url: runUrl(env, runId),
+    }),
+    { expirationTtl: RESULT_TTL_SEC },
+  );
+
   return jsonResponse({ ok: true, task_id: taskId, cipher }, 200);
+}
+
+function parseRunId(value) {
+  return /^\d{1,20}$/.test(String(value || '')) ? String(value) : undefined;
+}
+
+function runUrl(env, runId) {
+  if (!runId || !env.GITHUB_OWNER || !env.GITHUB_REPO) return undefined;
+  return `https://github.com/${encodeURIComponent(env.GITHUB_OWNER)}/${encodeURIComponent(env.GITHUB_REPO)}/actions/runs/${runId}`;
+}
+
+async function readJson(kv, key) {
+  const raw = await kv.get(key);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function sanitizeMeta(meta) {
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return undefined;
+  const json = JSON.stringify(meta);
+  return json.length <= 2048 ? meta : undefined;
 }
 
 async function handleInternalCallback(request, env) {
@@ -203,16 +245,24 @@ async function handleInternalCallback(request, env) {
   }
 
   const status = data.status === 'error' ? 'error' : 'done';
+  const resultKey = `result:${data.task_id}`;
+  const existing = (await readJson(env.PROBE_KV, resultKey)) || {};
+  const metaRunId = parseRunId(data.meta?.run_id) || existing.run_id;
   const record = {
     task_id: data.task_id,
     status,
     results: Array.isArray(data.results) ? data.results : [],
     error: data.error || undefined,
     duration_ms: typeof data.duration_ms === 'number' ? data.duration_ms : undefined,
+    meta: sanitizeMeta(data.meta),
+    created_at: existing.created_at,
+    started_at: existing.started_at,
+    run_id: metaRunId,
+    run_url: existing.run_url || runUrl(env, metaRunId),
     finished_at: Date.now(),
   };
 
-  await env.PROBE_KV.put(`result:${data.task_id}`, JSON.stringify(record), {
+  await env.PROBE_KV.put(resultKey, JSON.stringify(record), {
     expirationTtl: RESULT_TTL_SEC,
   });
 

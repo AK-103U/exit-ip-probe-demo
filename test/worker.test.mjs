@@ -122,11 +122,25 @@ test('full Worker workflow: probe -> dispatch -> burn-after-read pull -> signed 
   // 5. Internal pull returns cipher once and burns it immediately
   const pullRes = await worker.fetch(
     new Request(`https://example.com/internal/pull?task_id=${probeJson.task_id}`, {
-      headers: { Authorization: `Bearer ${env.PULL_TOKEN}` },
+      headers: { Authorization: `Bearer ${env.PULL_TOKEN}`, 'X-Run-Id': '123456789' },
     }),
     env,
   );
   assert.equal(pullRes.status, 200);
+
+  // Observability: once pulled, the task is "running" and links to the public Actions run.
+  const running = await (
+    await worker.fetch(
+      new Request(`https://example.com/result?task_id=${probeJson.task_id}`, {
+        headers: { Authorization: `Bearer ${env.API_TOKEN}` },
+      }),
+      env,
+    )
+  ).json();
+  assert.equal(running.status, 'running');
+  assert.equal(running.run_url, 'https://github.com/demo-owner/demo-repo/actions/runs/123456789');
+  assert.equal(typeof running.started_at, 'number');
+  assert.equal(typeof running.created_at, 'number');
   const pullJson = await pullRes.json();
   const decrypted = JSON.parse(await aesDecrypt(pullJson.cipher, env.AES_KEY));
   assert.equal(decrypted.raw_input, rawNode);
@@ -146,6 +160,7 @@ test('full Worker workflow: probe -> dispatch -> burn-after-read pull -> signed 
     status: 'done',
     results: [{ index: 0, name: 'HK', type: 'hysteria2', ok: true, exit_ip: '198.51.100.1', latency_ms: 420 }],
     duration_ms: 1500,
+    meta: { core: 'sing-box', core_version: '1.13.13', run_id: '123456789', runner_ipv6: false },
   });
   const badCb = await worker.fetch(
     new Request('https://example.com/internal/callback', {
@@ -184,4 +199,42 @@ test('full Worker workflow: probe -> dispatch -> burn-after-read pull -> signed 
   const finalJson = await res2.json();
   assert.equal(finalJson.status, 'done');
   assert.equal(finalJson.results[0].exit_ip, '198.51.100.1');
+  assert.equal(finalJson.meta.core_version, '1.13.13');
+  assert.equal(finalJson.run_url, running.run_url);
+  assert.equal(finalJson.created_at, running.created_at);
+  assert.equal(finalJson.started_at, running.started_at);
+});
+
+test('/probe keeps the indentation of pasted Clash YAML (no trim of the first line)', async () => {
+  const env = makeEnv();
+  const worker = createWorker(async () => new Response(null, { status: 204 }));
+  const pasted = '\n    - { name: A, type: ss, server: 198.51.100.1, port: 8388, cipher: aes-128-gcm, password: p1 }\n    - { name: B, type: ss, server: 198.51.100.2, port: 8388, cipher: aes-128-gcm, password: p2 }\n   \n';
+  const res = await worker.fetch(
+    new Request('https://example.com/probe', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${env.API_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ input: pasted }),
+    }),
+    env,
+  );
+  const { task_id: taskId } = await res.json();
+  const pull = await worker.fetch(
+    new Request(`https://example.com/internal/pull?task_id=${taskId}`, {
+      headers: { Authorization: `Bearer ${env.PULL_TOKEN}` },
+    }),
+    env,
+  );
+  const { raw_input: rawInput } = JSON.parse(await aesDecrypt((await pull.json()).cipher, env.AES_KEY));
+  assert.equal(rawInput.startsWith('    - { name: A'), true);
+  assert.equal(rawInput.endsWith('p2 }'), true);
+
+  const rejected = await worker.fetch(
+    new Request('https://example.com/probe', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${env.API_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ input: '  \n \t \n' }),
+    }),
+    env,
+  );
+  assert.equal(rejected.status, 400);
 });

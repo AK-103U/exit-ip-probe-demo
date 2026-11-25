@@ -64,3 +64,28 @@ pnpm install
 pnpm test
 pnpm run dev
 ```
+
+---
+
+## 输入格式
+
+- Clash YAML：完整配置（含 `proxies:`）、节点列表，或单行 `- { name: ..., type: ... }`。直接从 `proxies:` 下复制的带缩进内容可以原样粘贴。
+- 分享链接：`hysteria2://` / `hy2://` / `vless://` / `vmess://` / `trojan://` / `ss://` / `tuic://`，每行一个；也支持 Base64 订阅正文。
+- ECH：支持 Clash `ech-opts: { enable, config, query-server-name }` 和分享链接的 `ech=` 参数。未内置 `config` 时，Runner 会通过 DoH（Cloudflare，失败时改用 Google）查询 HTTPS 记录拿到 ECH 配置再交给 sing-box，不依赖 Runner 系统解析器。REALITY 节点会忽略 ECH。
+
+## 探测结果
+
+每个节点会分别探测 **IPv4 出口**（`1.1.1.1`）、**IPv6 出口**（`2606:4700:4700::1111`）和**双栈默认出口**（`www.cloudflare.com`），然后从 Runner 直接按**确切的落地 IP** 查询归属地，主源为 ip-api 批量接口，失败时改用 ipwho.is。这样归属信息总能对应到显示的 IP 上。
+
+| 字段 | 含义 |
+| :--- | :--- |
+| `ipv4` / `ipv6` | 各协议族的出口 IP、国家/城市、ISP、ASN，以及 `hosting`（机房 IP）、`warp`（经 Cloudflare WARP 出口）、`same_as_entry` |
+| `preferred` | 访问双栈网站时节点优先使用的协议族 |
+| `entry.ips` / `relation` | 入口解析结果与出入口关系：`direct`（入口即落地）、`same_network`（同 ASN 不同 IP）、`relay`（中转/分离出口）、`cdn`（入口为 CDN 边缘） |
+| `error_code` / `error` / `detail` | 失败原因分类、中文说明，以及脱敏后的内核或 curl 报错（已去除服务器地址、SNI、密码、UUID 等） |
+| `family_errors` | 节点可用但某一协议族失败时的原因（如没有 IPv6 出口） |
+| `timings` | 内核就绪耗时，以及各协议族的探测耗时 |
+
+常见 `error_code`：`handshake_timeout`（QUIC 无回应，常见于节点屏蔽境外机房 IP）、`auth_failed`、`tls_error` / `ech_rejected`、`reality_failed`、`connect_timeout`、`connection_refused`、`runner_no_ipv6`（GitHub Runner 没有 IPv6，无法连接仅 IPv6 入口的节点）、`core_start_failed`。
+
+任务状态依次为 `queued` → `running`（Runner 已领取，附 `run_url`）→ `done` / `error`。公开的 Actions 日志只输出节点数量、成功数和错误码计数，不包含节点名、地址或 IP。
