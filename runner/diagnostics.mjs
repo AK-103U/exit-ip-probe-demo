@@ -244,13 +244,14 @@ export const CDN_ASNS = new Set([13335, 209242, 54113, 20940, 16625, 21342, 1995
  * Relationship between the node entry (what the client dials) and the observed exit IPs:
  * direct (an exit equals an entry IP), cdn (entry is a CDN edge), same_network (same ASN,
  * different IP) or relay (entry and exit are unrelated, i.e. transit / split egress).
+ * `opts.cdn` marks an entry verified as a CDN edge by other means (e.g. Cloudflare BYOIP).
  */
-export function classifyRelation(entryIps = [], entryGeos = [], exits = []) {
+export function classifyRelation(entryIps = [], entryGeos = [], exits = [], opts = {}) {
   const exitList = exits.filter((e) => e?.ip);
   if (exitList.length === 0 || entryIps.length === 0) return 'unknown';
   if (exitList.some((e) => entryIps.includes(e.ip))) return 'direct';
   const entryAsns = entryGeos.map((g) => asnNumber(g?.asn)).filter(Boolean);
-  if (entryAsns.some((a) => CDN_ASNS.has(a))) return 'cdn';
+  if (opts.cdn || entryAsns.some((a) => CDN_ASNS.has(a))) return 'cdn';
   const exitAsns = exitList.map((e) => asnNumber(e.asn)).filter(Boolean);
   if (entryAsns.length > 0 && exitAsns.some((a) => entryAsns.includes(a))) return 'same_network';
   if (entryAsns.length === 0 || exitAsns.length === 0) return 'unknown';
@@ -297,13 +298,16 @@ export function buildNodeResult(probe, geoMap = new Map(), ctx = {}) {
 
   const entryGeos = entryIps.map((ip) => geoMap.get(ip)).filter(Boolean);
   const entryGeo = entryGeos[0] || {};
+  const cfEdge = entryIps.some((ip) => ctx.cdnEdges?.has(ip));
   const entryInfo = {
     ips: entryIps,
     error: entry.error || undefined,
     country_code: entryGeo.country_code,
     isp: entryGeo.isp,
     asn: entryGeo.asn,
-    cdn: entryGeos.some((g) => CDN_ASNS.has(asnNumber(g.asn))) || undefined,
+    cdn: entryGeos.some((g) => CDN_ASNS.has(asnNumber(g.asn))) || cfEdge || undefined,
+    // Cloudflare edge reached via an IP whose ASN is not Cloudflare's ("优选" / BYOIP range).
+    cdn_edge: cfEdge ? 'cloudflare' : undefined,
   };
 
   if (probe.coreFailure) {
@@ -367,7 +371,7 @@ export function buildNodeResult(probe, geoMap = new Map(), ctx = {}) {
     ipv6,
     preferred: dual ? (net.isIP(dual.ip) === 6 ? 'ipv6' : 'ipv4') : undefined,
     entry: entryInfo,
-    relation: classifyRelation(entryIps, entryGeos, [ipv4, ipv6, dual]),
+    relation: classifyRelation(entryIps, entryGeos, [ipv4, ipv6, dual], { cdn: cfEdge }),
     family_errors: Object.keys(familyErrors).length > 0 ? familyErrors : undefined,
   };
 }

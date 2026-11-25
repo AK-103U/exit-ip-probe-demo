@@ -297,7 +297,10 @@
         : item.entry?.error ? `<div class="sub">入口解析失败 (${escapeHtml(item.entry.error)})</div>` : '';
       if (!item.ok) return entryLine || '-';
       const [label, cls, title] = RELATION[item.relation] || RELATION.unknown;
-      return `${tag(label, cls, title)}${entryLine}`;
+      const edge = item.entry?.cdn_edge === 'cloudflare'
+        ? '<div class="sub" title="入口 IP 的 ASN 不是 Cloudflare，但由 Cloudflare 边缘应答（BYOIP / 优选 IP）">Cloudflare 优选 IP</div>'
+        : '';
+      return `${tag(label, cls, title)}${entryLine}${edge}`;
     }
 
     function statusCell(item) {

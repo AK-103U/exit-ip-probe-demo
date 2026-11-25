@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { echFromDohAnswer, geoLookup, prepareEch } from '../runner/netinfo.mjs';
+import { echFromDohAnswer, geoLookup, isCloudflareEdge, prepareEch } from '../runner/netinfo.mjs';
 
 function echB64() {
   const pn = Buffer.from('cloudflare-ech.com');
@@ -84,4 +84,28 @@ test('geoLookup maps ip-api batch rows by request order and falls back to ipwho.
   assert.equal(map.get('9.9.9.9').asn, 'AS19281 Quad9');
   assert.equal(map.get('9.9.9.9').geo_source, 'ipwho.is');
   assert.equal(map.has('10.0.0.1'), false);
+});
+
+test('isCloudflareEdge recognizes a Cloudflare trace response and rejects other servers', async () => {
+  const http = await import('node:http');
+  const serve = (body) =>
+    new Promise((resolve) => {
+      const srv = http.createServer((req, res) => {
+        assert.equal(req.url, '/cdn-cgi/trace');
+        assert.equal(req.headers.host, 'www.cloudflare.com');
+        res.end(body);
+      });
+      srv.listen(0, '127.0.0.1', () => resolve(srv));
+    });
+
+  const edge = await serve('fl=1023f36\nh=www.cloudflare.com\nip=192.0.2.1\ncolo=LAX\n');
+  const other = await serve('<html>nginx</html>');
+  try {
+    assert.equal(await isCloudflareEdge('127.0.0.1', { port: edge.address().port }), true);
+    assert.equal(await isCloudflareEdge('127.0.0.1', { port: other.address().port }), false);
+    assert.equal(await isCloudflareEdge('127.0.0.1', { port: 9, timeoutMs: 500 }), false);
+  } finally {
+    edge.close();
+    other.close();
+  }
 });

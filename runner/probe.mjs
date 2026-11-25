@@ -8,13 +8,16 @@ import { aesDecrypt, hmacSign } from '../shared/crypto.mjs';
 import { isValidUuid } from '../shared/validate.mjs';
 import { parseNodesInput } from './parser.mjs';
 import {
+  asnNumber,
   buildNodeResult,
+  CDN_ASNS,
   createLineBuffer,
   ipMatchesFamily,
+  isPublicIp,
   parseCfTrace,
   summarizeCodes,
 } from './diagnostics.mjs';
-import { geoLookup, prepareEch, resolveEntry, runnerHasIpv6 } from './netinfo.mjs';
+import { geoLookup, isCloudflareEdge, prepareEch, resolveEntry, runnerHasIpv6 } from './netinfo.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -247,9 +250,28 @@ async function finalizeResults(probes) {
   ]);
 
   const hosts = { ipv4: PROBES.ipv4.hosts, ipv6: PROBES.ipv6.hosts };
-  const results = probes.map((p) => buildNodeResult(p, geoMap, { runnerIpv6, hosts }));
+  const cdnEdges = await detectCloudflareEdges(probes, geoMap);
+  const results = probes.map((p) => buildNodeResult(p, geoMap, { runnerIpv6, hosts, cdnEdges }));
   const geoSources = [...new Set([...geoMap.values()].map((g) => g.geo_source))];
   return { results, runnerIpv6, geoSources };
+}
+
+/**
+ * For nodes whose exit is unrelated to the entry and whose entry ASN is not a known CDN,
+ * check whether the entry is actually a Cloudflare edge (BYOIP / "优选" IP). One check per IP.
+ */
+async function detectCloudflareEdges(probes, geoMap) {
+  const candidates = new Set();
+  for (const p of probes) {
+    const entryIps = p.entry?.ips || [];
+    const exits = Object.values(p.families || {}).filter((f) => f?.ok).map((f) => f.ip);
+    if (entryIps.length === 0 || exits.length === 0 || exits.some((ip) => entryIps.includes(ip))) continue;
+    if (entryIps.some((ip) => CDN_ASNS.has(asnNumber(geoMap.get(ip)?.asn)))) continue;
+    const ip = entryIps.find(isPublicIp);
+    if (ip) candidates.add(ip);
+  }
+  const checks = await Promise.all([...candidates].slice(0, 20).map(async (ip) => [ip, await isCloudflareEdge(ip)]));
+  return new Set(checks.filter(([, edge]) => edge).map(([ip]) => ip));
 }
 
 async function pullEncryptedPayload(workerUrl, taskId, pullToken, runId) {

@@ -3,6 +3,7 @@
  * ECH config retrieval over DoH, entry host resolution, IP geo lookup, Runner IPv6 check.
  */
 import { lookup } from 'node:dns/promises';
+import http from 'node:http';
 import net from 'node:net';
 import { echConfigToPem } from './parser.mjs';
 import { isPublicIp, normalizeIpApi, normalizeIpWhois } from './diagnostics.mjs';
@@ -86,6 +87,29 @@ export async function resolveEntry(server) {
   } catch (err) {
     return { ips: [], error: err?.code || 'lookup_failed' };
   }
+}
+
+/**
+ * Detects Cloudflare edges that ASN data misses, e.g. "优选" BYOIP ranges announced under a
+ * customer's ASN: a Cloudflare edge answers /cdn-cgi/trace for any proxied hostname.
+ */
+export function isCloudflareEdge(ip, { port = 80, timeoutMs = 3000 } = {}) {
+  return new Promise((resolve) => {
+    const req = http.get(
+      { host: ip, port, path: '/cdn-cgi/trace', headers: { Host: 'www.cloudflare.com' }, timeout: timeoutMs },
+      (res) => {
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (c) => {
+          body += c;
+          if (body.length > 4096) res.destroy();
+        });
+        res.on('close', () => resolve(/^fl=/m.test(body) && /^colo=[A-Z]{3}/m.test(body)));
+      },
+    );
+    req.on('timeout', () => req.destroy());
+    req.on('error', () => resolve(false));
+  });
 }
 
 let ipv6Check;

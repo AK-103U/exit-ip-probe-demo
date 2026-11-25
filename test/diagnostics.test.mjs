@@ -202,3 +202,29 @@ test('summarizeCodes only exposes error-code counts', () => {
     'handshake_timeout:2,runner_no_ipv6:1',
   );
 });
+
+test('a verified Cloudflare edge entry (BYOIP / 优选 IP) is reported as cdn, not relay', () => {
+  const bigcommerce = { asn: 'AS399566 Bigcommerce Inc.' };
+  const exit = { ip: '198.51.100.29', asn: 'AS399646 Example Hosting' };
+  assert.equal(classifyRelation(['192.0.2.47'], [bigcommerce], [exit]), 'relay');
+  assert.equal(classifyRelation(['192.0.2.47'], [bigcommerce], [exit], { cdn: true }), 'cdn');
+  // A direct match still wins over the CDN hint.
+  assert.equal(classifyRelation(['192.0.2.47'], [bigcommerce], [{ ip: '192.0.2.47' }], { cdn: true }), 'direct');
+
+  const result = buildNodeResult(
+    {
+      index: 0,
+      name: 'CF-WS',
+      type: 'vless',
+      outbound: OUTBOUND,
+      entry: { ips: ['192.0.2.47', '192.0.2.33'] },
+      families: { ipv4: { ok: true, ip: '198.51.100.29', source: 'cf-trace' }, ipv6: { ok: false, attempts: [] }, dual: { ok: true, ip: '198.51.100.29' } },
+      coreLines: [],
+    },
+    new Map([['192.0.2.47', bigcommerce], ['198.51.100.29', exit]]),
+    { cdnEdges: new Set(['192.0.2.47']) },
+  );
+  assert.equal(result.relation, 'cdn');
+  assert.equal(result.entry.cdn, true);
+  assert.equal(result.entry.cdn_edge, 'cloudflare');
+});

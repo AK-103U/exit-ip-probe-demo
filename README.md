@@ -81,7 +81,7 @@ pnpm run dev
 | :--- | :--- |
 | `ipv4` / `ipv6` | 各协议族的出口 IP、国家/城市、ISP、ASN，以及 `hosting`（机房 IP）、`warp`（经 Cloudflare WARP 出口）、`same_as_entry` |
 | `preferred` | 访问双栈网站时节点优先使用的协议族 |
-| `entry.ips` / `relation` | 入口解析结果与出入口关系：`direct`（入口即落地）、`same_network`（同 ASN 不同 IP）、`relay`（中转/分离出口）、`cdn`（入口为 CDN 边缘） |
+| `entry.ips` / `relation` | 入口解析结果与出入口关系：`direct`（入口即落地）、`same_network`（同 ASN 不同 IP）、`relay`（中转/分离出口）、`cdn`（入口为 CDN 边缘，包括 ASN 不属于 Cloudflare、但由 Cloudflare 边缘应答的“优选 IP”，此时 `entry.cdn_edge` 为 `cloudflare`） |
 | `error_code` / `error` / `detail` | 失败原因分类、中文说明，以及脱敏后的内核或 curl 报错（已去除服务器地址、SNI、密码、UUID 等） |
 | `family_errors` | 节点可用但某一协议族失败时的原因（如没有 IPv6 出口） |
 | `timings` | 内核就绪耗时，以及各协议族的探测耗时 |
